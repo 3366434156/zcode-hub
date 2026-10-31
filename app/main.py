@@ -14,7 +14,7 @@ from . import constants, logs, settings
 from .captcha import captcha_manager
 from .claim import claim_round
 from .quota import monitor
-from .routes import admin_api, admin_logs, admin_tunnel, burner_api, gateway, pages
+from .routes import admin_api, admin_logs, admin_tunnel, gateway, pages
 from .version_sync import version_sync
 
 # 修正 Windows 中文控制台可能出现的乱码
@@ -153,9 +153,6 @@ async def lifespan(app: FastAPI):
     from .tunnel import tunnel
 
     tunnel.autostart()        # 公网隧道（ZCODE_TUNNEL=1 或后台开过）
-    from .burner import burner
-
-    burner.start()            # 着色器工单轮询（派单/验收）
     base = f"http://{_display_host()}:{settings.PORT}"
     logs.banner([
         f"{logs._B}{logs._MAG}zcode-hub{logs._R} {logs._DIM}v{settings.APP_VERSION} · Python{logs._R}",
@@ -167,7 +164,6 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        burner.stop()
         tunnel.stop(persist=False)
         await monitor.stop()
         await version_sync.stop()
@@ -187,7 +183,6 @@ def create_app() -> FastAPI:
     # 拆开可以让「日志」随时增删而不碰 admin_api 这个已经很大的文件
     app.include_router(admin_logs.router, prefix="/admin/api")
     app.include_router(admin_tunnel.router)
-    app.include_router(burner_api.router)
     app.include_router(gateway.router)
     return app
 

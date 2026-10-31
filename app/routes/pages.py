@@ -59,10 +59,6 @@ async def admin_settings():
     return _html("settings.html")
 
 
-@router.get("/admin/burner", include_in_schema=False)
-async def admin_burner():
-    return _html("burner.html")
-
 
 @router.get("/meta", include_in_schema=False)
 async def meta():

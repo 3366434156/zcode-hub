@@ -9,7 +9,6 @@ async function renderAdminHeader(){
   const nav=[
     ['/admin/accounts','账号池'],
     ['/admin/monitoring','请求监控'],
-    ['/admin/burner','着色器工单'],
     ['/admin/logs','网关日志'],
     ['/admin/settings','设置'],
   ].map(([href,label])=>
