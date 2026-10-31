@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>zcode-hub · 网关日志</title>
+  <link href="/static/css/app.css?v={{APP_VERSION}}" rel="stylesheet">
+  <link href="/static/css/logs.css?v={{APP_VERSION}}" rel="stylesheet">
+</head>
+<body>
+<div id="admin-header" data-active="/admin/logs"></div>
+
+<main class="admin-main">
+  <div class="page-hd">
+    <div>
+      <div class="page-title">网关日志</div>
+      <div class="page-sub">实时捕获请求、调度、额度刷新、验证码与异常告警 · 落盘 data/logs/（保留 14 天），进程退出后仍可查案</div>
+    </div>
+    <div class="page-actions">
+      <span class="live-dot" id="live-dot">实时监听中</span>
+      <button onclick="refresh(true)" class="page-action-btn">刷新</button>
+    </div>
+  </div>
+
+  <div class="logs-toolbar">
+    <div class="seg" id="level-seg">
+      <button class="range-btn active" data-level="" onclick="setLevel('')">全部</button>
+      <button class="range-btn" data-level="INFO" onclick="setLevel('INFO')">INFO</button>
+      <button class="range-btn" data-level="WARN" onclick="setLevel('WARN')">WARN</button>
+      <button class="range-btn" data-level="ERROR" onclick="setLevel('ERROR')">ERROR</button>
+    </div>
+    <div class="seg" id="tag-seg">
+      <button class="range-btn active" data-tag="" onclick="setTag('')">全部模块</button>
+    </div>
+    <input class="logs-search" id="search" type="text" placeholder="过滤关键字（如 401、quota、某账号名）…" oninput="onSearch()">
+    <span class="logs-stats" id="logs-stats">—</span>
+    <button onclick="toggleAuto()" class="page-action-btn" id="btn-auto">暂停监听</button>
+    <button onclick="toggleScroll()" class="page-action-btn" id="btn-scroll">自动滚屏：开</button>
+    <button onclick="copyView()" class="page-action-btn">复制</button>
+    <button onclick="downloadLogs()" class="page-action-btn">导出</button>
+    <button onclick="clearAll()" class="page-action-btn" style="color:var(--red)">清空</button>
+  </div>
+
+  <div class="terminal">
+    <div class="terminal-head">
+      <div class="terminal-dots">
+        <i class="d-err"></i><i class="d-warn"></i><i class="d-ok"></i>
+        <span class="terminal-title" id="file-name">gateway.jsonl</span>
+      </div>
+      <span class="terminal-status" id="status">就绪</span>
+    </div>
+    <div class="terminal-body" id="body">
+      <div class="log-empty">正在拉取网关日志…</div>
+    </div>
+  </div>
+</main>
+
+<script src="/static/js/auth.js?v={{APP_VERSION}}"></script>
+<script src="/static/js/toast.js?v={{APP_VERSION}}"></script>
+<script src="/static/js/header.js?v={{APP_VERSION}}"></script>
+<script>
+/* 网关日志页：5 秒增量轮询（since 只取新行），级别/模块/关键字过滤在服务端做，
+   本地不再二次过滤——口径只有一份，计数才对得上。 */
+let level = '', tag = '', keyword = '';
+let since = 0;              // 最近一条的时间戳：增量拉取的游标
+let auto = true, scroll = true;
+let timer = null, view = [];
+
+function $(id){return document.getElementById(id);}
+
+(async()=>{
+  await renderAdminHeader();
+  const key = await adminKey.get();
+  if(!key || !await verifyKey(ADMIN_API+'/verify', key).catch(()=>false)) return location.href='/admin/login';
+  refresh(true);
+  timer = setInterval(()=>{ if(auto) refresh(false); }, 5000);
+})();
+
+function setLevel(v){
+  level = v;
+  [...document.querySelectorAll('#level-seg .range-btn')].forEach(b=>b.classList.toggle('active', b.dataset.level===v));
+  refresh(true);
+}
+function setTag(v){
+  tag = v;
+  [...document.querySelectorAll('#tag-seg .range-btn')].forEach(b=>b.classList.toggle('active', b.dataset.tag===v));
+  refresh(true);
+}
+let searchTimer = null;
+function onSearch(){
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(()=>{ keyword = $('search').value.trim(); refresh(true); }, 300);
+}
+function toggleAuto(){
+  auto = !auto;
+  $('btn-auto').textContent = auto ? '暂停监听' : '继续监听';
+  $('live-dot').textContent = auto ? '实时监听中' : '已暂停';
+  $('live-dot').classList.toggle('paused', !auto);
+}
+function toggleScroll(){
+  scroll = !scroll;
+  $('btn-scroll').textContent = `自动滚屏：${scroll?'开':'关'}`;
+}
+
+function query(){ return `level=${encodeURIComponent(level)}&tag=${encodeURIComponent(tag)}&q=${encodeURIComponent(keyword)}`; }
+
+async function refresh(reset){
+  try{
+    $('status').textContent = '拉取中…';
+    const url = reset ? `/logs?${query()}&limit=300` : `/logs?${query()}&since=${since}&limit=300`;
+    const d = await api('GET', url);
+    if(reset){ since = 0; view = []; $('body').innerHTML=''; }
+    const rows = d.rows || [];
+    if(rows.length){
+      since = Math.max(since, ...rows.map(r=>r.ts));
+      view = view.concat(rows).slice(-2000);   // 本地也只留 2000，防长开爆内存
+      append(rows);
+    }
+    renderStats(d);
+    $('status').textContent = `就绪 · 最新 ${fmtTime(since)}`;
+    if(scroll && rows.length) scrollBottom();
+  }catch(e){ $('status').textContent = '拉取失败: '+e.message; }
+}
+
+function renderStats(d){
+  const s = d.stats || {};
+  const lv = s.levels || {};
+  $('logs-stats').textContent =
+    `今日 ${s.today ?? 0} · 内存环 ${s.ring ?? 0}/${s.keep ?? 0} · ` +
+    `ERROR ${lv.ERROR ?? 0} · WARN ${lv.WARN ?? 0} · 文件 ${fmtSize(s.file_size)}`;
+  const box = $('file-name');
+  if(box && s.file) box.textContent = s.file.split(/[\\/]/).pop();
+  // 模块标签动态生成：后端细分新 tag 时这里自动多一个按钮
+  const seg = $('tag-seg');
+  const current = tag;
+  seg.innerHTML = `<button class="range-btn${current===''?' active':''}" data-tag="" onclick="setTag('')">全部模块</button>` +
+    (d.tags || []).map(t=>`<button class="range-btn${current===t.tag?' active':''}" data-tag="${esc(t.tag)}" onclick="setTag('${esc(t.tag)}')">${esc(t.tag)} ${t.count}</button>`).join('');
+}
+
+function append(rows){
+  const body = $('body');
+  const empty = body.querySelector('.log-empty');
+  if(empty) empty.remove();
+  body.insertAdjacentHTML('beforeend', rows.map(rowHtml).join(''));
+  // 长开一整天也别把 DOM 撑爆：超过 2000 行从头部裁
+  while(body.children.length > 2000) body.firstChild.remove();
+}
+
+function rowHtml(e){
+  const t = new Date(e.ts*1000);
+  const hh = `${String(t.getHours()).padStart(2,'0')}:${String(t.getMinutes()).padStart(2,'0')}:${String(t.getSeconds()).padStart(2,'0')}`;
+  return `<div class="log-line lv-${e.level.toLowerCase()}">` +
+    `<span class="log-time">${hh}</span>` +
+    `<span class="log-level lv-${e.level.toLowerCase()}">${e.level}</span>` +
+    `<span class="log-tag">[${esc(e.tag)}]</span>` +
+    (e.req_id?`<span class="log-req">${esc(e.req_id)}</span>`:'') +
+    `<span class="log-msg">${esc(e.msg)}</span></div>`;
+}
+
+function scrollBottom(){ const b=$('body'); b.scrollTop = b.scrollHeight; }
+function fmtTime(ts){ if(!ts) return '—'; const d=new Date(ts*1000); return d.toLocaleTimeString('zh-CN',{hour12:false}); }
+function fmtSize(n){ if(n==null) return '—'; if(n>1048576) return (n/1048576).toFixed(1)+' MB'; if(n>1024) return (n/1024).toFixed(1)+' KB'; return n+' B'; }
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+
+async function copyView(){
+  const text = view.map(e=>`${fmtTime(e.ts)} ${e.level} [${e.tag}]${e.req_id?' '+e.req_id:''} ${e.msg}`).join('\n');
+  if(await copyToClipboard(text))showToast(`已复制 ${view.length} 行`,'success');
+  else showToast('复制失败','error');
+}
+
+async function downloadLogs(){
+  try{
+    const key = await adminKey.get();
+    const r = await fetch(ADMIN_API+'/logs/download', {headers:{Authorization:'Bearer '+key}});
+    if(!r.ok) throw new Error((await r.json().catch(()=>({}))).detail || r.statusText);
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `zcode-gateway-${new Date().toISOString().slice(0,10)}.jsonl`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }catch(e){ showToast('导出失败: '+e.message,'error'); }
+}
+
+async function clearAll(){
+  if(!confirm('清空内存环并截断今日日志文件？（更早的落盘文件保留）'))return;
+  try{ await api('POST','/logs/clear'); showToast('已清空','success'); refresh(true); }
+  catch(e){ showToast('清空失败: '+e.message,'error'); }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,688 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>zcode-hub · 数据看板</title>
+  <link href="/static/css/app.css?v={{APP_VERSION}}" rel="stylesheet">
+  <link href="/static/css/dashboard.css?v={{APP_VERSION}}" rel="stylesheet">
+</head>
+<body>
+<div id="admin-header" data-active="/admin/monitoring"></div>
+
+<main class="admin-main">
+  <div class="page-hd">
+    <div>
+      <div class="page-title">数据看板</div>
+      <div class="page-sub" id="page-sub">每请求一行台账（SQLite 持久化，保留 30 天）· Token / 缓存命中 / 首字 / 生成速度 / 换号换模型</div>
+    </div>
+    <div class="page-actions">
+      <span class="live-dot" id="live-dot">实时监控中</span>
+      <button onclick="refresh(true)" class="page-action-btn">刷新</button>
+      <button onclick="clearAll()" class="page-action-btn">清空</button>
+    </div>
+  </div>
+
+  <div class="dash-toolbar">
+    <div class="dash-range seg" id="range-seg">
+      <button class="range-btn" data-range="1h" onclick="setRange('1h')">1 小时</button>
+      <button class="range-btn active" data-range="today" onclick="setRange('today')">今日</button>
+      <button class="range-btn" data-range="d3" onclick="setRange('d3')">近 3 日</button>
+      <button class="range-btn" data-range="7d" onclick="setRange('7d')">本周</button>
+      <button class="range-btn" data-range="30d" onclick="setRange('30d')">近 30 天</button>
+      <button class="range-btn" data-range="all" onclick="setRange('all')">全部</button>
+    </div>
+    <div class="dash-range seg" id="channel-seg" title="来源：公网 = Cloudflare 隧道传入的请求；内网 = 局域网 / 本机直连">
+      <button class="range-btn active" data-channel="all" onclick="setChannel('all')">全部来源</button>
+      <button class="range-btn" data-channel="public" onclick="setChannel('public')">公网</button>
+      <button class="range-btn" data-channel="local" onclick="setChannel('local')">内网</button>
+    </div>
+  </div>
+
+  <section class="panel" id="channel-panel">
+    <div class="phead">
+      <h2>来源用量</h2>
+      <span class="hint">公网 = Cloudflare 隧道传入 · 内网 = 局域网 / 本机直连 · 合计 = 两者之和</span>
+      <div class="spacer"></div>
+      <span class="hm-meta" id="channel-meta">—</span>
+    </div>
+    <div class="pbody"><div class="ch-strip" id="channel-strip"></div></div>
+  </section>
+
+  <div class="kpis" id="kpis">
+    <div class="kpi big">
+      <div class="accentbar"></div>
+      <div class="k"><span class="ic">◆</span>TOKEN 消耗</div>
+      <div class="v" id="k-tokens">—</div>
+      <div class="kdelta"><span class="delta" id="d-tokens"></span></div>
+      <div class="s" id="s-tokens">—</div>
+      <div class="tokflow" id="tokflow"></div>
+      <canvas class="spark" id="spark-tokens" height="34"></canvas>
+    </div>
+    <div class="kpi big">
+      <div class="k"><span class="ic">⇄</span>请求数</div>
+      <div class="v" id="k-calls">—</div>
+      <div class="kdelta"><span class="delta" id="d-calls"></span></div>
+      <div class="s" id="s-calls">—</div>
+      <canvas class="spark" id="spark-calls" height="34"></canvas>
+    </div>
+    <div class="kpi big">
+      <div class="k"><span class="ic">⚡</span>生成速度</div>
+      <div class="v" id="k-tps">—</div>
+      <div class="kdelta"><span class="delta" id="d-tps"></span></div>
+      <div class="s" id="s-tps">—</div>
+      <canvas class="spark" id="spark-tps" height="34"></canvas>
+    </div>
+    <div class="kpi big">
+      <div class="k"><span class="ic">♻</span>缓存命中率</div>
+      <div class="v" id="k-cache">—</div>
+      <div class="kdelta"><span class="delta" id="d-cache"></span></div>
+      <div class="s" id="s-cache">—</div>
+      <canvas class="spark" id="spark-cache" height="34"></canvas>
+    </div>
+    <div class="kpi big">
+      <div class="k"><span class="ic">⇋</span>换模型</div>
+      <div class="v" id="k-fb">—</div>
+      <div class="kdelta"><span class="delta" id="d-fb"></span></div>
+      <div class="s">模型兜底自动切换</div>
+      <canvas class="spark" id="spark-fb" height="34"></canvas>
+    </div>
+    <div class="kpi ringcard">
+      <div class="k"><span class="ic">✓</span>请求成功率</div>
+      <div class="ringwrap">
+        <div class="ring" id="ring"><div class="hole"><b id="ring-pct">—</b><span>成功</span></div></div>
+      </div>
+      <div class="s" id="s-ring" style="text-align:center">—</div>
+    </div>
+  </div>
+
+  <div class="maingrid">
+    <section class="panel">
+      <div class="phead">
+        <h2>Token 时序</h2>
+        <span class="hint" id="series-hint">—</span>
+        <div class="spacer"></div>
+        <div class="seg chiprow" id="metric-seg">
+          <button class="range-btn active" data-metric="tokens" onclick="setMetric('tokens')">Token</button>
+          <button class="range-btn" data-metric="calls" onclick="setMetric('calls')">请求数</button>
+          <button class="range-btn" data-metric="tps" onclick="setMetric('tps')">吞吐量</button>
+        </div>
+      </div>
+      <div class="pbody">
+        <div class="chartbox">
+          <canvas id="series-canvas" height="176"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="phead">
+        <h2>最近请求</h2>
+        <span class="hint">实时活动流</span>
+        <div class="spacer"></div>
+        <span class="hm-meta" id="recent-meta">—</span>
+      </div>
+      <div class="pbody">
+        <div class="recent-list" id="recent-list"><div class="empty">加载中…</div></div>
+      </div>
+    </section>
+  </div>
+
+  <section class="panel">
+    <div class="phead">
+      <h2>工作回溯</h2>
+      <span class="hint">近 12 周每日请求</span>
+      <div class="spacer"></div>
+      <div class="hm-meta" id="hm-meta">—</div>
+    </div>
+    <div class="pbody">
+      <div class="hm-row">
+        <div class="hm-scroll">
+          <div class="hm-wrap">
+            <div class="hm-days"><span>一</span><span></span><span>三</span><span></span><span>五</span><span></span><span></span></div>
+            <div class="hm-cols">
+              <div class="hm-grid" id="hm-grid"></div>
+            </div>
+          </div>
+        </div>
+        <div class="hm-stats" id="hm-stats"></div>
+      </div>
+      <div class="hm-foot">
+        <span id="hm-summary">—</span>
+        <span class="hm-legend">少 <span class="hm-cell l0"></span><span class="hm-cell l1"></span><span class="hm-cell l2"></span><span class="hm-cell l3"></span><span class="hm-cell l4"></span> 多</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="phead">
+      <h2>用量明细</h2>
+      <div class="spacer"></div>
+      <div class="seg dimtabs" id="tabs">
+        <button class="range-btn active" data-tab="detail" onclick="setTab('detail')">明细</button>
+        <button class="range-btn" data-tab="live" onclick="setTab('live')">实时 <span class="cnt" id="live-cnt">0</span></button>
+        <button class="range-btn" data-tab="account" onclick="setTab('account')">按账号</button>
+        <button class="range-btn" data-tab="model" onclick="setTab('model')">按模型</button>
+        <button class="range-btn" data-tab="endpoint" onclick="setTab('endpoint')">按端点</button>
+        <button class="range-btn" data-tab="channel" onclick="setTab('channel')">按来源</button>
+      </div>
+    </div>
+    <div class="pbody">
+      <div class="dash-filters">
+        <select class="input dash-select" id="f-outcome" onchange="refresh(true)">
+          <option value="all">全部结果</option>
+          <option value="completed">成功</option>
+          <option value="fail">失败</option>
+          <option value="client_aborted">客户端断开</option>
+          <option value="upstream_aborted">上游中断</option>
+        </select>
+        <input class="input dash-search" id="f-q" type="text" placeholder="搜索账号、模型、内容、错误…" oninput="onSearch()">
+      </div>
+      <div id="table-wrap"></div>
+      <div class="mon-pager" id="pager" style="display:none">
+        <span class="mon-pager-info" id="pager-info"></span>
+        <button class="btn btn-ghost" onclick="page(-1)">上一页</button>
+        <button class="btn btn-ghost" onclick="page(1)">下一页</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div class="modal-mask" id="modal">
+  <div class="modal">
+    <div class="mon-detail">
+      <div class="mon-detail-hd">
+        <div class="mon-detail-title">请求详情</div>
+        <button class="dialog-btn" onclick="closeDetail()">关闭</button>
+      </div>
+      <div id="modal-body"></div>
+    </div>
+  </div>
+</div>
+
+<script src="/static/js/auth.js?v={{APP_VERSION}}"></script>
+<script src="/static/js/toast.js?v={{APP_VERSION}}"></script>
+<script src="/static/js/header.js?v={{APP_VERSION}}"></script>
+<script>
+/* 数据看板：一次 /admin/api/usage 拿全部聚合（KPI/时序/热力图/维度表/明细），
+   5 秒轮询只打这一个端点——口径天然一致，也不会一轮打四个请求。 */
+const state = { range:'today', channel:'all', metric:'tokens', tab:'detail', page:0, limit:100,
+                q:'', usage:null, live:[], timer:null };
+
+/* 来源通道：public = Cloudflare 隧道传入（公网），local = 局域网/本机直连 */
+const CHANNEL_LABEL = {public:'公网', local:'内网'};
+
+const OUTCOME_LABEL = {completed:'成功', failed:'失败', client_aborted:'客户端断开',
+                       upstream_aborted:'上游中断'};
+const STREAM_TITLE = '流式（SSE 逐块下发；非流式是一次性整段返回）';
+
+function $(id){return document.getElementById(id);}
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+
+(async()=>{
+  await renderAdminHeader();
+  const key = await adminKey.get();
+  if(!key || !await verifyKey(ADMIN_API+'/verify', key).catch(()=>false)) return location.href='/admin/login';
+  refresh(true);
+  state.timer = setInterval(()=>refresh(false), 5000);
+})();
+
+function setRange(r){
+  state.range = r; state.page = 0;
+  [...document.querySelectorAll('#range-seg .range-btn')].forEach(b=>b.classList.toggle('active', b.dataset.range===r));
+  refresh(true);
+}
+function setChannel(c){
+  state.channel = c; state.page = 0;
+  [...document.querySelectorAll('#channel-seg .range-btn')].forEach(b=>b.classList.toggle('active', b.dataset.channel===c));
+  refresh(true);
+}
+function setMetric(m){
+  state.metric = m;
+  [...document.querySelectorAll('#metric-seg .range-btn')].forEach(b=>b.classList.toggle('active', b.dataset.metric===m));
+  renderSeries();
+}
+function setTab(t){
+  state.tab = t; state.page = 0;
+  [...document.querySelectorAll('#tabs .range-btn')].forEach(b=>b.classList.toggle('active', b.dataset.tab===t));
+  renderTable();
+}
+let searchTimer=null;
+function onSearch(){
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(()=>{ state.q = $('f-q').value.trim(); state.page=0; refresh(true); }, 300);
+}
+function page(delta){
+  const next = state.page + delta;
+  if(next < 0) return;
+  state.page = next;
+  refresh(false);
+}
+
+async function refresh(reset){
+  try{
+    const qs = new URLSearchParams({
+      range: state.range, outcome: $('f-outcome')?.value || 'all',
+      q: state.q, channel: state.channel, limit: state.limit, offset: state.page * state.limit,
+    });
+    const [u, live] = await Promise.all([
+      api('GET', `/usage?${qs}`),
+      api('GET', '/monitoring'),
+    ]);
+    state.usage = u;
+    state.live = (live.entries || []);
+    $('live-cnt').textContent = state.live.filter(e=>e.ok===null).length;
+    renderKpis(); renderChannels(); renderSeries(); renderHeatmap(); renderTable(); renderRecent();
+    $('live-dot').textContent = '实时监控中 · ' + new Date().toLocaleTimeString('zh-CN',{hour12:false});
+  }catch(e){ showToast('加载失败: '+e.message, 'error'); }
+}
+
+function fmtNum(n){
+  if(n==null) return '—';
+  if(n>=1e8) return (n/1e8).toFixed(2)+' 亿';
+  if(n>=1e4) return (n/1e4).toFixed(1)+' 万';
+  return String(Math.round(n));
+}
+function delta(cur, prev){
+  if(cur==null || prev==null || !prev) return '';
+  const pct = (cur-prev)/Math.abs(prev)*100;
+  if(!isFinite(pct) || Math.abs(pct) < 1) return '<span class="d-flat">≈ 持平</span>';
+  const up = pct > 0;
+  return `<span class="${up?'d-up':'d-down'}">${up?'↑':'↓'} ${Math.abs(pct).toFixed(1)}%</span>`;
+}
+function renderKpis(){
+  const s = state.usage?.stats || {}, p = s.prev || {};
+  const total = (s.input_tokens||0)+(s.cached_tokens||0)+(s.output_tokens||0);
+  $('k-tokens').textContent = total ? fmtNum(total) : '—';
+  $('s-tokens').textContent = `输入 ${fmtNum(s.input_tokens)} · 缓存 ${fmtNum(s.cached_tokens)} · 输出 ${fmtNum(s.output_tokens)}`;
+  $('d-tokens').innerHTML = delta(total, (p.input_tokens||0)+(p.cached_tokens||0)+(p.output_tokens||0));
+  const sum = total || 1;
+  $('tokflow').innerHTML = ['input_tokens','cached_tokens','output_tokens'].map((k,i)=>{
+    const v = s[k]||0; if(!v) return '';
+    return `<i class="tf-${i}" style="width:${(v/sum*100).toFixed(1)}%" title="${['输入','缓存','输出'][i]} ${v}"></i>`;
+  }).join('');
+
+  $('k-calls').textContent = s.calls ?? 0;
+  $('s-calls').textContent = `成功 ${s.ok||0} · 失败 ${s.fail||0}`;
+  $('d-calls').innerHTML = delta(s.calls, p.calls);
+
+  $('k-tps').textContent = s.avg_tps==null ? '—' : s.avg_tps.toFixed(1);
+  $('s-tps').textContent = `峰值 ${s.peak_tps==null?'—':s.peak_tps} tok/s`;
+  $('d-tps').innerHTML = delta(s.avg_tps, p.avg_tps);
+
+  $('k-cache').textContent = s.cache_hit_pct==null ? '—' : s.cache_hit_pct+'%';
+  $('s-cache').textContent = `命中 ${fmtNum(s.cached_tokens)} tokens`;
+  $('d-cache').innerHTML = delta(s.cache_hit_pct, p.cache_hit_pct);
+
+  $('k-fb').textContent = (s.fallback||0) + ' 次';
+  $('d-fb').innerHTML = delta(s.fallback, p.fallback);
+
+  const rate = s.success_rate;
+  $('ring-pct').textContent = rate==null ? '—' : rate.toFixed(1)+'%';
+  $('ring').style.setProperty('--pct', (rate==null?0:rate));
+  $('s-ring').textContent = `成功 ${s.ok||0} / 共 ${s.calls||0}`;
+
+  drawSpark('spark-tokens', seriesValues('tokens'));
+  drawSpark('spark-calls', seriesValues('calls'));
+  drawSpark('spark-tps', seriesValues('tps'));
+  drawSpark('spark-cache', seriesValues('cached_tokens'));
+  drawSpark('spark-fb', seriesValues('fail'), true);
+}
+
+function seriesValues(metric){
+  const rows = state.usage?.series || [];
+  return rows.map(r=>{
+    if(metric==='tokens') return (r.tokens||0);
+    if(metric==='calls') return (r.calls||0);
+    if(metric==='tps') return (r.tps||0);
+    if(metric==='cached_tokens') return (r.cached_tokens||0);
+    if(metric==='fail') return (r.fail||0);
+    return 0;
+  });
+}
+
+/* 来源用量：公网 / 内网 / 合计。后端的 by_channel 恒定忽略来源筛选，
+   所以这里三栏永远能同时看到（合计 = 公网 + 内网）。点卡片即按来源筛选。 */
+function renderChannels(){
+  const rows = state.usage?.by_channel || [];
+  const byName = {};
+  rows.forEach(r=>{ byName[r.name||'local'] = r; });
+  const pub = byName.public || {calls:0, ok:0, fail:0, input_tokens:0, output_tokens:0};
+  const loc = byName.local || {calls:0, ok:0, fail:0, input_tokens:0, output_tokens:0};
+  const total = {
+    calls: (pub.calls||0)+(loc.calls||0),
+    ok: (pub.ok||0)+(loc.ok||0),
+    fail: (pub.fail||0)+(loc.fail||0),
+    input_tokens: (pub.input_tokens||0)+(loc.input_tokens||0),
+    output_tokens: (pub.output_tokens||0)+(loc.output_tokens||0),
+  };
+  const share = n => {
+    if(!total.calls) return '—';
+    const pct = n/total.calls*100;
+    if(n > 0 && pct < 0.1) return '<0.1%';   // 占比很小的来源也要显示「有」，别写成 0.0%
+    return `${pct.toFixed(1)}%`;
+  };
+  const rate = r => r.calls ? `${((r.ok||0)/r.calls*100).toFixed(1)}%` : '—';
+  // total=null → 合计卡不显示占比（100% 没有信息量）
+  const card = (key, label, r, cls, note, showShare=true) => `
+    <button class="ch-card ${cls}${state.channel===key?' active':''}" onclick="setChannel('${key}')"
+            title="点击只看${label}${key==='all'?'（合计）':''}的请求">
+      <div class="ch-head"><span class="ch-dot"></span>${label}<span class="ch-share">${showShare ? share(r.calls||0) : ''}</span></div>
+      <div class="ch-main">${fmtNum(r.calls||0)}<span class="ch-unit"> 次</span></div>
+      <div class="ch-sub">成功率 ${rate(r)} · ${fmtNum((r.input_tokens||0)+(r.output_tokens||0))} tokens</div>
+      <div class="ch-note">${note}</div>
+    </button>`;
+  $('channel-strip').innerHTML =
+    card('public', '公网', pub, 'ch-public', 'Cloudflare 隧道传入') +
+    card('local', '内网', loc, 'ch-local', '局域网 / 本机直连') +
+    card('all', '合计', total, 'ch-total', '公网 + 内网', false);
+  $('channel-meta').textContent = state.channel==='all'
+    ? '当前：合计' : `当前：只看${CHANNEL_LABEL[state.channel] || state.channel}`;
+}
+
+
+/* 迷你趋势线：KPI 卡下方的 sparkline（纯 canvas，不引图表库） */
+function drawSpark(id, values, danger){
+  const cv = $(id); if(!cv) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth || 200, h = 34;
+  cv.width = w*dpr; cv.height = h*dpr;
+  const ctx = cv.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0,0,w,h);
+  if(!values.length) return;                  // 没数据就留空，别画个假的
+  const color = danger ? 'rgba(224,82,82,' : 'rgba(232,163,61,';
+  if(values.length === 1){
+    // 单点画不出趋势：给一条基线，否则面积填充会变成斜切的三角形
+    ctx.strokeStyle = color + '.5)'; ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.moveTo(0, h-3); ctx.lineTo(w, h-3); ctx.stroke();
+    return;
+  }
+  const max = Math.max(...values, 1), min = Math.min(...values, 0);
+  const span = max-min || 1;
+  const step = w/(values.length-1);
+  ctx.beginPath();
+  values.forEach((v,i)=>{
+    const x = i*step, y = h - 2 - ((v-min)/span)*(h-4);
+    i ? ctx.lineTo(x,y) : ctx.moveTo(x,y);
+  });
+  ctx.strokeStyle = color + '.85)';
+  ctx.lineWidth = 1.6; ctx.lineJoin='round'; ctx.stroke();
+  ctx.lineTo(w,h); ctx.lineTo(0,h); ctx.closePath();
+  ctx.fillStyle = color + '.12)';
+  ctx.fill();
+}
+
+function renderSeries(){
+  const rows = state.usage?.series || [];
+  const cv = $('series-canvas');
+  if(!cv) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth || 600, h = 176;
+  cv.width = w*dpr; cv.height = h*dpr;
+  const ctx = cv.getContext('2d');
+  ctx.scale(dpr,dpr);
+  ctx.clearRect(0,0,w,h);
+  if(!rows.length){
+    ctx.fillStyle='#838794'; ctx.font='13px sans-serif';
+    ctx.fillText('这个区间还没有请求', 16, h/2);
+    $('series-hint').textContent='—'; return;
+  }
+
+  const vals = rows.map(r => state.metric==='tokens' ? (r.tokens||0)
+                              : state.metric==='calls' ? (r.calls||0) : (r.tps||0));
+  const max = Math.max(...vals, 1);
+  const padL = 46, padR = 10, padT = 12, padB = 24;
+  const plotW = w-padL-padR, plotH = h-padT-padB;
+
+  ctx.strokeStyle='#26282f'; ctx.lineWidth=1; ctx.font='10px ui-monospace,monospace';
+  ctx.fillStyle='#838794';
+  for(let i=0;i<=3;i++){
+    const y = padT + plotH*i/3;
+    ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(w-padR,y); ctx.stroke();
+    ctx.fillText(fmtNum(max*(1-i/3)), 4, y+3);
+  }
+
+  if(rows.length === 1){
+    // 只有一个时间桶：折线画不出趋势，画一根居中的柱子（否则会变成一条斜切的三角形）
+    const bw = Math.min(plotW*0.5, 120);
+    const v = vals[0];
+    const bh = (v/max)*plotH;
+    ctx.fillStyle='rgba(232,163,61,.75)';
+    ctx.fillRect(padL + (plotW-bw)/2, padT + plotH - bh, bw, bh);
+    ctx.fillStyle='#838794';
+    const only = new Date(rows[0].hour*3600000).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false});
+    ctx.fillText(only, padL, h-8);
+    $('series-hint').textContent = `1 个时间桶（${only}）· 峰值 ${fmtNum(max)}`;
+    return;
+  }
+
+  const step = plotW/(rows.length-1);
+  ctx.beginPath();
+  rows.forEach((r,i)=>{
+    const v = vals[i];
+    const x = padL + i*step, y = padT + plotH - (v/max)*plotH;
+    i ? ctx.lineTo(x,y) : ctx.moveTo(x,y);
+  });
+  ctx.strokeStyle='#e8a33d'; ctx.lineWidth=1.8; ctx.lineJoin='round'; ctx.stroke();
+  ctx.lineTo(padL+plotW, padT+plotH); ctx.lineTo(padL, padT+plotH); ctx.closePath();
+  ctx.fillStyle='rgba(232,163,61,.10)'; ctx.fill();
+  const hourLabel = i => new Date(rows[i].hour*3600000).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false});
+  ctx.fillStyle='#838794';
+  ctx.fillText(hourLabel(0), padL, h-8);
+  const lastLabel = hourLabel(rows.length-1);
+  ctx.fillText(lastLabel, w-padR-ctx.measureText(lastLabel).width, h-8);
+  $('series-hint').textContent = `${rows.length} 个时间桶 · 峰值 ${fmtNum(max)}`;
+}
+
+function renderHeatmap(){
+  const rows = state.usage?.heatmap || [];
+  const grid = $('hm-grid'); if(!grid) return;
+  if(!rows.length){ grid.innerHTML = '<div class="hm-empty">最近还没有活动</div>'; return; }
+  const byDay = new Map(rows.map(r=>[Math.round(r.day), r.calls]));
+  const end = new Date(); end.setHours(0,0,0,0);
+  // 起点必须落在周一，否则 grid-auto-flow:column + 7 行会把「今天」排到错误的行
+  // ——热力图的「星期几」标签是固定写在左侧的，错位之后整张图都在骗人。
+  const monday = new Date(end);
+  monday.setDate(monday.getDate() - ((end.getDay()+6)%7));   // 本周一
+  const start = new Date(monday);
+  start.setDate(start.getDate() - 7*11);                      // 往前 11 周 → 12 周共 84 格
+  const stop = new Date(monday);
+  stop.setDate(stop.getDate() + 6);                            // 本周日
+  let maxCalls = Math.max(...rows.map(r=>r.calls), 1);
+  let total = 0, active = 0;
+  const cells = [];
+  const cur = new Date(start);
+  while(cur <= stop){
+    const c = byDay.get(Math.round(cur.getTime()/1000)) || 0;
+    total += c; if(c>0) active++;
+    const lv = c===0?0 : c<=maxCalls*0.15?1 : c<=maxCalls*0.4?2 : c<=maxCalls*0.7?3 : 4;
+    cells.push(`<span class="hm-cell l${lv}" title="${cur.toLocaleDateString('zh-CN')} · ${c} 次请求"></span>`);
+    cur.setDate(cur.getDate()+1);
+  }
+  grid.innerHTML = cells.join('');
+  $('hm-meta').textContent = `近 12 周 · ${active} 天有活动`;
+  $('hm-summary').textContent = `共 ${total} 次请求，最忙一天 ${maxCalls} 次`;
+  $('hm-stats').innerHTML = `<div><b>${total}</b><span>请求总数</span></div>
+    <div><b>${active}</b><span>活跃天数</span></div>
+    <div><b>${(total/Math.max(active,1)).toFixed(1)}</b><span>日均（活跃日）</span></div>`;
+}
+
+const DETAIL_COLS = ['时间','账号','模型','结果','码','首字','生成','总耗时','输入','命中','输出','tok/s','内容 / 错误'];
+const AGG_COLS = ['名称','调用','成功','失败','成功率','输入','输出','首字','tok/s','最近'];
+
+function renderTable(){
+  const u = state.usage; if(!u) return;
+  const wrap = $('table-wrap');
+  if(state.tab==='live'){ renderLive(wrap); return; }
+  if(state.tab==='detail'){ renderDetail(wrap, u); return; }
+  renderAgg(wrap, u);
+}
+
+function fmtTs(ts){ const d=new Date(ts*1000); return d.toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}); }
+function fmtMs(ms){ if(ms==null) return '—'; return ms>=1000 ? (ms/1000).toFixed(2)+'s' : Math.round(ms)+'ms'; }
+function fmtTok(n){ if(n==null) return '—'; if(n>=1e6) return (n/1e6).toFixed(2)+'M'; if(n>=1e3) return (n/1e3).toFixed(1)+'k'; return String(n); }
+
+function outcomeBadge(outcome, code){
+  if(outcome==null) return '<span class="badge badge-cooling">进行中</span>';
+  const map={completed:'badge-active',failed:'badge-invalid',client_aborted:'badge-disabled',upstream_aborted:'badge-cooling'};
+  const label = OUTCOME_LABEL[outcome] || outcome;
+  return `<span class="badge ${map[outcome]||'badge-disabled'}">${esc(label)}${code&&outcome!=='completed'?' '+code:''}</span>`;
+}
+function streamTag(stream){
+  return stream ? `<span class="mon-stream" title="${STREAM_TITLE}">流式</span>` : '';
+}
+/* 来源标记：只给公网请求挂标（内网是默认，标出来只会加噪音） */
+function channelTag(ch){
+  return ch==='public'
+    ? '<span class="mon-stream ch-tag-pub" title="来源：Cloudflare 隧道传入的公网请求">公网</span>'
+    : '';
+}
+function swapTag(e){
+  const req = e.requested_model||'', model = e.model||'';
+  if(!req || req===model) return '';
+  return `<span class="mon-swap" title="客户端请求 ${esc(req)}，实际由 ${esc(model)} 服务">换模型</span>`;
+}
+function switchTag(e){
+  const list = Array.isArray(e.switches) ? e.switches : [];
+  if(!list.length) return '';
+  const detail = list.map(s=>`${s.from||'—'} → ${s.to||'—'}：${s.why||'未记录'}`).join('\n');
+  return `<span class="mon-swap mon-switch" title="换号 ${list.length} 次：\n${esc(detail)}">换号 ${list.length}</span>`;
+}
+
+function renderDetail(wrap, u){
+  const rows = u.rows || [];
+  if(!rows.length){
+    wrap.innerHTML='<div class="empty-block">这个区间还没有请求。换个大一点的时间范围试试。</div>';
+    $('pager').style.display='none'; return;
+  }
+  const head = `<div class="mon-head mon-grid-detail">${DETAIL_COLS.map(n=>`<span>${n}</span>`).join('')}</div>`;
+  const body = rows.map((e,i)=>`
+    <div class="mon-row mon-grid-detail mon-clickable" onclick="openDetail(${i})">
+      <span class="mon-time">${fmtTs(e.ts)}</span>
+      <span class="mon-name" title="${esc(e.account||'')}">${esc(e.account||'—')}${e.mode?` <span class="tier-b ${e.mode==='jwt'?'jwt':'other'}">${e.mode==='jwt'?'JWT':'KEY'}</span>`:''}${switchTag(e)}</span>
+      <span class="mon-model" title="${esc(e.model||'')}${e.requested_model?` (请求 ${esc(e.requested_model)})`:''}">${esc(e.model||'—')}${swapTag(e)}</span>
+      <span>${outcomeBadge(e.outcome, e.http_status)}${streamTag(e.stream)}${channelTag(e.channel)}</span>
+      <span class="mon-num">${e.http_status??'—'}</span>
+      <span class="mon-num">${fmtMs(e.ttft_ms)}</span>
+      <span class="mon-num">${fmtMs(e.gen_ms)}</span>
+      <span class="mon-num">${fmtMs(e.total_ms)}</span>
+      <span class="mon-num">${fmtTok(e.input_tokens)}</span>
+      <span class="mon-num" title="${e.cached_tokens!=null?`缓存命中 ${e.cached_tokens} tokens`:''}">${e.cache_hit_pct==null?'—':e.cache_hit_pct+'%'}</span>
+      <span class="mon-num">${fmtTok(e.output_tokens)}</span>
+      <span class="mon-num">${e.tokens_per_sec??'—'}</span>
+      <span class="mon-preview" title="${esc(e.error||e.preview||'')}">${e.ok===false&&e.error?`<span class="err-line">${esc(e.error)}</span>`:esc(e.preview||'—')}</span>
+    </div>`).join('');
+  wrap.innerHTML = `<div class="mon-table">${head}${body}</div>`;
+  const total = u.total||0, pages = Math.ceil(total/(u.limit||100));
+  $('pager').style.display='flex';
+  $('pager-info').textContent = `共 ${total} 条 · 第 ${state.page+1}/${Math.max(pages,1)} 页`;
+}
+
+function renderAgg(wrap, u){
+  const key = state.tab==='account' ? 'by_account'
+            : state.tab==='model' ? 'by_model'
+            : state.tab==='channel' ? 'by_channel'
+            : 'by_endpoint';
+  const rows = u[key] || [];
+  if(!rows.length){ wrap.innerHTML='<div class="empty-block">这个区间还没有数据。</div>'; $('pager').style.display='none'; return; }
+  const head = `<div class="mon-head mon-grid-agg">${AGG_COLS.map(n=>`<span>${n}</span>`).join('')}</div>`;
+  const body = rows.map(g=>`
+    <div class="mon-row mon-grid-agg">
+      <span class="mon-name">${esc(CHANNEL_LABEL[g.name] || g.name || '—')}</span>
+      <span class="mon-num">${g.calls||0}</span>
+      <span class="mon-num" style="color:var(--mint)">${g.ok||0}</span>
+      <span class="mon-num" style="color:${(g.fail||0)?'var(--red)':'inherit'}">${g.fail||0}</span>
+      <span class="mon-num">${g.success_rate==null?'—':g.success_rate+'%'}</span>
+      <span class="mon-num">${fmtTok(g.input_tokens)}</span>
+      <span class="mon-num">${fmtTok(g.output_tokens)}</span>
+      <span class="mon-num">${fmtMs(g.avg_ttft_ms)}</span>
+      <span class="mon-num">${g.avg_tps??'—'}</span>
+      <span class="mon-time">${g.last_ts?fmtTs(g.last_ts):'—'}</span>
+    </div>`).join('');
+  wrap.innerHTML = `<div class="mon-table">${head}${body}</div>`;
+  $('pager').style.display='none';
+}
+
+function renderLive(wrap){
+  const rows = state.live;
+  if(!rows.length){ wrap.innerHTML='<div class="empty-block">还没有进行中的请求。</div>'; $('pager').style.display='none'; return; }
+  const head = `<div class="mon-head mon-grid-live"><span>时间</span><span>账号</span><span>模型</span><span>状态</span><span>首字</span><span>生成</span><span>总耗时</span><span>输入</span><span>输出</span><span>tok/s</span><span>内容</span></div>`;
+  const body = rows.map(e=>{
+    const now = Date.now()/1000;
+    const tTotal = e.t_total ?? (now - e.ts);
+    const ttft = e.ttft, gen = (e.t_last!=null && ttft!=null) ? e.t_last-ttft : null;
+    const tps = (gen && gen>0 && e.output_tokens) ? (e.output_tokens/gen).toFixed(1) : null;
+    return `<div class="mon-row mon-grid-live">
+      <span class="mon-time">${fmtTs(e.ts)}</span>
+      <span class="mon-name" title="${esc(e.account||'')}">${esc(e.account||'—')}${e.mode?` <span class="tier-b ${e.mode==='jwt'?'jwt':'other'}">${e.mode==='jwt'?'JWT':'KEY'}</span>`:''}${switchTag(e)}</span>
+      <span class="mon-model" title="${esc(e.model||'')}">${esc(e.model||'—')}${swapTag(e)}</span>
+      <span>${e.outcome==null&&e.ok===null?'<span class="badge badge-cooling">进行中</span>':outcomeBadge(e.outcome,e.status)}${channelTag(e.channel)}</span>
+      <span class="mon-num">${fmtMs(ttft!=null?ttft*1000:null)}</span>
+      <span class="mon-num">${fmtMs(gen!=null?gen*1000:null)}</span>
+      <span class="mon-num">${tTotal!=null?fmtMs(tTotal*1000):'—'}</span>
+      <span class="mon-num">${fmtTok(e.input_tokens)}</span>
+      <span class="mon-num">${fmtTok(e.output_tokens)}</span>
+      <span class="mon-num">${tps??'—'}</span>
+      <span class="mon-preview" title="${esc(e.error||e.preview||'')}">${e.ok===false&&e.error?`<span class="err-line">${esc(e.error)}</span>`:esc(e.preview||'—')}</span>
+    </div>`;
+  }).join('');
+  wrap.innerHTML = `<div class="mon-table">${head}${body}</div>`;
+  $('pager').style.display='none';
+}
+
+function renderRecent(){
+  const box = $('recent-list'); if(!box) return;
+  const rows = state.live.slice(0, 12);
+  if(!rows.length){ box.innerHTML='<div class="empty">还没有请求</div>'; return; }
+  box.innerHTML = rows.map(e=>{
+    const done = !(e.outcome==null && e.ok===null);
+    const ok = done && e.outcome==='completed';
+    const dot = !done ? '<span class="recent-dot run"></span>' : ok ? '<span class="recent-dot ok"></span>' : '<span class="recent-dot bad"></span>';
+    const t = e.t_total!=null ? fmtMs(e.t_total*1000) : '进行中';
+    return `<div class="recent-item" title="${esc(e.error||e.preview||'')}">
+      ${dot}
+      <span class="recent-time">${new Date(e.ts*1000).toLocaleTimeString('zh-CN',{hour12:false})}</span>
+      <span class="recent-acct">${esc(e.account||'—')}</span>
+      <span class="recent-model">${esc(e.model||'—')}</span>
+      <span class="recent-ms">${t}</span>
+    </div>`;
+  }).join('');
+  $('recent-meta').textContent = rows.length < state.live.length
+    ? `最新 ${rows.length} / 共 ${state.live.length} 条`
+    : `${state.live.length} 条在途/最近`;
+}
+
+function openDetail(idx){
+  const e = (state.usage?.rows||[])[idx]; if(!e) return;
+  const kv = (k,v)=>`<div class="mon-detail-kv"><span>${k}</span><b>${v}</b></div>`;
+  $('modal-body').innerHTML = `<div class="mon-detail-grid">
+      ${kv('时间', fmtTs(e.ts))}
+      ${kv('账号', esc(e.account||'—') + (e.mode?` · ${e.mode==='jwt'?'JWT':'API Key'}`:''))}
+      ${kv('模型', esc(e.model) + (e.requested_model?` <span class="mon-muted">（请求 ${esc(e.requested_model)}）</span>`:''))}
+      ${kv('流式', e.stream?'是':'否')}
+      ${kv('结果', `${OUTCOME_LABEL[e.outcome]||e.outcome}${e.http_status?` · HTTP ${e.http_status}`:''}`)}
+      ${kv('首字延迟', fmtMs(e.ttft_ms))}
+      ${kv('生成耗时', fmtMs(e.gen_ms))}
+      ${kv('总耗时', fmtMs(e.total_ms))}
+      ${kv('输入', `${fmtTok(e.input_tokens)} <span class="mon-muted">${e.input_tokens??0} tokens</span>`)}
+      ${kv('缓存命中', `${e.cache_hit_pct==null?'—':e.cache_hit_pct+'%'} <span class="mon-muted">${e.cached_tokens??0} tokens</span>`)}
+      ${kv('输出', `${fmtTok(e.output_tokens)} <span class="mon-muted">${e.output_tokens??0} tokens</span>`)}
+      ${kv('生成速度', e.tokens_per_sec?`${e.tokens_per_sec} tok/s`:'—')}
+      ${kv('端点', esc(e.endpoint||'—'))}
+    </div>
+    ${(Array.isArray(e.switches)&&e.switches.length)?`<div class="mon-detail-block"><div class="mon-detail-label">换号轨迹（${e.switches.length} 次）</div><pre class="mon-pre">${esc(e.switches.map(s=>`${s.from||'—'} → ${s.to||'—'}：${s.why||'未记录'}`).join('\n'))}</pre></div>`:''}
+    ${e.error?`<div class="mon-detail-block"><div class="mon-detail-label">错误</div><pre class="mon-pre err-line">${esc(e.error)}</pre></div>`:''}
+    <div class="mon-detail-block"><div class="mon-detail-label">请求内容预览</div><pre class="mon-pre">${esc(e.preview||'—')}</pre></div>`;
+  $('modal').classList.add('show');
+}
+function closeDetail(){ $('modal').classList.remove('show'); }
+
+async function clearAll(){
+  if(!confirm('清空实时环与持久台账？此操作不可撤销。')) return;
+  try{ await api('POST','/monitoring/clear'); showToast('已清空','success'); refresh(true); }
+  catch(e){ showToast('清空失败: '+e.message,'error'); }
+}
+</script>
+</body>
+</html>

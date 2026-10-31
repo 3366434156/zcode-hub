@@ -1,0 +1,6 @@
+* text=auto eol=lf
+# .bat / .cmd 例外：cmd.exe 解析批处理依赖行尾，且按控制台代码页读取文件，
+# 非 ASCII 字符会打乱解析（"is not recognized as an internal or external command"）。
+# 所以批处理必须原样以 CRLF 检出，且内容保持纯 ASCII。
+*.bat text eol=crlf
+*.cmd text eol=crlf

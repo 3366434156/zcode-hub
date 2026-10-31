@@ -1,0 +1,32 @@
+# ── 运行时生成，永不入库 ──
+data/
+*.db
+*.db-wal
+*.db-shm
+*.zsb
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# Node（captcha_node）
+node_modules/
+
+# 秘钥 / 凭证导出
+*accounts*.json
+zcode-accounts*.json
+
+data-tunneltest/
+data-*/
+
+# 旧复刻历史本地备份（远端 3366434156/zcode2api 另有存档）
+.git.liu5269-backup/
