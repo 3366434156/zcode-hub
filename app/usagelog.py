@@ -64,6 +64,37 @@ CREATE INDEX IF NOT EXISTS idx_req_ts      ON requests (ts);
 CREATE INDEX IF NOT EXISTS idx_req_account ON requests (account);
 CREATE INDEX IF NOT EXISTS idx_req_model   ON requests (model);
 CREATE INDEX IF NOT EXISTS idx_req_outcome ON requests (outcome);
+
+-- 日聚合表：请求明细只保留 3 天（可配），Token/成败/换模型统计按「本地日 × 模型 × 来源」
+-- 永久滚动累计——看板的长期视图（近 30 日 / 全部 / 热力图）从这里 + 近期明细合并而来。
+CREATE TABLE IF NOT EXISTS requests_daily (
+    day           INTEGER NOT NULL,          -- 本地 0 点 epoch 秒（与 heatmap 口径一致）
+    model         TEXT    NOT NULL DEFAULT '',
+    channel       TEXT    NOT NULL DEFAULT '',
+    calls         INTEGER NOT NULL DEFAULT 0,
+    ok            INTEGER NOT NULL DEFAULT 0,
+    fail          INTEGER NOT NULL DEFAULT 0,
+    input_tokens  INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cached_tokens INTEGER NOT NULL DEFAULT 0,
+    credit        REAL    NOT NULL DEFAULT 0,
+    fallback      INTEGER NOT NULL DEFAULT 0,
+    ttft_sum      REAL    NOT NULL DEFAULT 0, -- 加权和（均值的可合并表示）
+    ttft_n        INTEGER NOT NULL DEFAULT 0,
+    gen_sum       REAL    NOT NULL DEFAULT 0,
+    gen_n         INTEGER NOT NULL DEFAULT 0,
+    total_sum     REAL    NOT NULL DEFAULT 0,
+    tps_sum       REAL    NOT NULL DEFAULT 0,
+    tps_n         INTEGER NOT NULL DEFAULT 0,
+    tps_max       REAL    NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, model, channel)
+);
+-- 滚动游标：已聚合到哪个时间戳（增量滚动，杜绝同一天被重复累计）
+CREATE TABLE IF NOT EXISTS requests_daily_meta (
+    id      INTEGER PRIMARY KEY CHECK (id = 1),
+    last_ts REAL NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO requests_daily_meta (id, last_ts) VALUES (1, 0);
 """
 # 注意：channel 的索引**不能**放进 _SCHEMA —— 老库这时还没有该列（ALTER 在
 # _init_db 里晚于 executescript），索引会直接报 "no such column"。见 _init_db。
@@ -204,17 +235,111 @@ class UsageLog:
         try:
             if settings.USAGE_RETENTION_DAYS > 0:
                 cutoff = now - settings.USAGE_RETENTION_DAYS * 86400
-                conn.execute("DELETE FROM requests WHERE ts < ?", (cutoff,))
+                # 先把要删的行按「本地日 × 模型 × 来源」滚动累计进日聚合表（增量，
+                # 游标 last_ts 保证同一行只会被累计一次），再删除——Token 统计永久保留。
+                last = self._rolled_to()
+                self._rollup(conn, ts_from=last, ts_to=cutoff)
+                conn.execute("DELETE FROM requests WHERE ts <= ?", (cutoff,))
+                self._set_rolled_to(conn, cutoff)
             if settings.USAGE_MAX_ROWS > 0:
-                conn.execute(
-                    """DELETE FROM requests WHERE id <= (
-                           SELECT id FROM requests ORDER BY id DESC LIMIT 1 OFFSET ?
-                       )""",
+                cap = conn.execute(
+                    """SELECT id, ts FROM requests ORDER BY id DESC LIMIT 1 OFFSET ?""",
                     (settings.USAGE_MAX_ROWS,),
-                )
+                ).fetchone()
+                if cap is not None:
+                    # 行数超限被删的行同样要先聚合（此时它们的 ts 必然 > 游标，
+                    # 因为更老的已被上一条按天清掉了）；游标取滚动集的真实 MAX(ts)
+                    last = self._rolled_to()
+                    rolled_max = self._rollup(conn, ts_from=last, ts_to=None, max_id=cap["id"])
+                    conn.execute("DELETE FROM requests WHERE id <= ?", (cap["id"],))
+                    if rolled_max is not None:
+                        self._set_rolled_to(conn, max(self._rolled_to(), rolled_max))
             conn.commit()
         except sqlite3.Error:
             pass
+
+    @staticmethod
+    def _rolled_to(conn: sqlite3.Connection) -> float:
+        row = conn.execute("SELECT last_ts FROM requests_daily_meta WHERE id = 1").fetchone()
+        return float(row["last_ts"]) if row else 0.0
+
+    @staticmethod
+    def _set_rolled_to(conn: sqlite3.Connection, ts: float) -> None:
+        conn.execute("UPDATE requests_daily_meta SET last_ts = ? WHERE id = 1", (ts,))
+
+    @staticmethod
+    def _rollup(conn: sqlite3.Connection, ts_from: float, ts_to: float | None,
+                max_id: int | None = None) -> float | None:
+        """把 (ts_from, ts_to]（或 id <= max_id）的行聚合进日聚合表（增量 UPSERT）。
+
+        本地日切分公式与 heatmap 完全一致：CAST((ts + tz)/86400)*86400 - tz。
+        """
+        tz = time.timezone
+        conds, params = [], []
+        if ts_to is not None:
+            conds.append("ts <= ?")
+            params.append(ts_to)
+        if max_id is not None:
+            conds.append("id <= ?")
+            params.append(max_id)
+        conds.append("ts > ?")
+        params.append(ts_from)
+        where = " AND ".join(conds)
+        conn.execute(
+            f"""INSERT INTO requests_daily (
+                    day, model, channel, calls, ok, fail,
+                    input_tokens, output_tokens, cached_tokens, credit, fallback,
+                    ttft_sum, ttft_n, gen_sum, gen_n, total_sum, tps_sum, tps_n, tps_max)
+                SELECT day, model, channel, calls, ok, fail,
+                       input, output, cached, credit, fallback,
+                       ttft, ttft_n, gen, gen_n, total, tps, tps_n, tps_m
+                FROM (
+                    SELECT CAST(strftime('%s', CAST(ts AS INTEGER), 'unixepoch', 'localtime', 'start of day')
+                            AS INTEGER) AS day,
+                           model, channel,
+                           COUNT(*) AS calls,
+                           SUM(CASE WHEN outcome = 'completed' THEN 1 ELSE 0 END) AS ok,
+                           SUM(CASE WHEN outcome <> 'completed' THEN 1 ELSE 0 END) AS fail,
+                           SUM(COALESCE(input_tokens, 0))  AS input,
+                           SUM(COALESCE(output_tokens, 0)) AS output,
+                           SUM(COALESCE(cached_tokens, 0)) AS cached,
+                           SUM(COALESCE(credit, 0))        AS credit,
+                           SUM(CASE WHEN requested_model <> '' AND requested_model <> model
+                                    THEN 1 ELSE 0 END) AS fallback,
+                           SUM(COALESCE(ttft_ms, 0)) AS ttft,
+                           SUM(CASE WHEN ttft_ms IS NOT NULL THEN 1 ELSE 0 END) AS ttft_n,
+                           SUM(COALESCE(gen_ms, 0)) AS gen,
+                           SUM(CASE WHEN gen_ms IS NOT NULL THEN 1 ELSE 0 END) AS gen_n,
+                           SUM(COALESCE(total_ms, 0)) AS total,
+                           SUM(COALESCE(tokens_per_sec, 0)) AS tps,
+                           SUM(CASE WHEN tokens_per_sec IS NOT NULL THEN 1 ELSE 0 END) AS tps_n,
+                           MAX(COALESCE(tokens_per_sec, 0)) AS tps_m
+                    FROM requests WHERE {where}
+                    GROUP BY day, model, channel
+                ) WHERE true
+                ON CONFLICT(day, model, channel) DO UPDATE SET
+                    calls         = calls         + excluded.calls,
+                    ok            = ok            + excluded.ok,
+                    fail          = fail          + excluded.fail,
+                    input_tokens  = input_tokens  + excluded.input_tokens,
+                    output_tokens = output_tokens + excluded.output_tokens,
+                    cached_tokens = cached_tokens + excluded.cached_tokens,
+                    credit        = credit        + excluded.credit,
+                    fallback      = fallback      + excluded.fallback,
+                    ttft_sum      = ttft_sum      + excluded.ttft_sum,
+                    ttft_n        = ttft_n        + excluded.ttft_n,
+                    gen_sum       = gen_sum       + excluded.gen_sum,
+                    gen_n         = gen_n         + excluded.gen_n,
+                    total_sum     = total_sum     + excluded.total_sum,
+                    tps_sum       = tps_sum       + excluded.tps_sum,
+                    tps_n         = tps_n         + excluded.tps_n,
+                    tps_max       = MAX(tps_max, excluded.tps_max)""",
+            (*params,),
+        )
+        row = conn.execute(
+            f"SELECT MAX(ts) AS m FROM requests WHERE {where}", params
+        ).fetchone()
+        return float(row["m"]) if row and row["m"] is not None else None
 
     def close(self) -> None:
         thread, self._thread = self._thread, None
@@ -252,29 +377,109 @@ class UsageLog:
             row["switches"] = []
         return row
 
-    def stats(self, where: str = "", params: tuple = ()) -> dict:
+    def stats(self, where: str = "", params: tuple = (), start: float | None = None,
+              dims: dict | None = None) -> dict:
         """区间聚合：总量、成功率、时延、token、缓存命中、tok/s。
 
         where 里第一个条件固定是 `ts >= ?`（见 admin_api._usage_filter），
         这里顺手用它做「上一等长周期」的对比查询——KPI 卡上的 ↑↓ 就靠它。
+
+        start/dims：跨期联邦参数。明细行只保留 3 天（滚动进日聚合表），
+        start 早于滚动游标时把日聚合表中该范围内的天并入——Token 长期统计因此不丢。
+        dims 只支持 model/channel 两个维度（日聚合表的粒度）；带 account/关键词
+        搜索的查询不联邦（dims=None，自动退化为仅近期明细）。
         """
         out = self._stats_once(where, params)
-        out["prev"] = self._prev_stats(where, params)
+        if start is not None and dims is not None:
+            rolled_to = self._rolled_to()
+            day_from, day_to = self._federate_days(start, rolled_to)
+            if day_from is not None:
+                daily = self._daily_stats(day_from, day_to,
+                                          model=dims.get("model", ""),
+                                          channel=dims.get("channel", ""))
+                out = _merge_stats(out, daily)
+        out["prev"] = self._prev_stats(where, params, start=start, dims=dims)
         return out
 
-    def _prev_stats(self, where: str, params: tuple) -> dict:
-        """上一个等长周期的同口径聚合（拿不到就返回空 dict，前端显示「—」）。"""
+    def _rolled_to(self) -> float:
+        with closing(self._connect()) as conn:
+            row = conn.execute("SELECT last_ts FROM requests_daily_meta WHERE id = 1").fetchone()
+        return float(row["last_ts"]) if row else 0.0
+
+    @staticmethod
+    def _federate_days(start: float, rolled_to: float) -> tuple[int | None, int | None]:
+        """联邦的本地日范围：start 所在当天如果已(部分)滚动，为避免重复计数
+        从次日起算（边界日最多损失 <1 天的旧数据，宁缺勿重）。"""
+        if rolled_to <= 0 or start >= rolled_to:
+            return None, None
+        day0 = int((start + time.timezone) // 86400) * 86400 - time.timezone
+        day_from = day0 + 86400 if start > day0 else day0
+        day_to = int((rolled_to + time.timezone) // 86400) * 86400 - time.timezone
+        if day_from > day_to:
+            return None, None
+        return day_from, day_to
+
+    def _daily_stats(self, day_from: int, day_to: int,
+                     model: str = "", channel: str = "") -> dict:
+        clause = " WHERE day >= ? AND day <= ?"
+        params: list = [day_from, day_to]
+        if model:
+            clause += " AND model = ?"
+            params.append(model)
+        if channel in ("public", "local"):
+            clause += " AND channel = ?"
+            params.append(channel)
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                f"""SELECT SUM(calls) AS calls, SUM(ok) AS ok, SUM(fail) AS fail,
+                           SUM(input_tokens) AS input_tokens,
+                           SUM(output_tokens) AS output_tokens,
+                           SUM(cached_tokens) AS cached_tokens,
+                           SUM(credit) AS credit, SUM(fallback) AS fallback,
+                           SUM(ttft_sum) AS ttft_sum, SUM(ttft_n) AS ttft_n,
+                           SUM(gen_sum) AS gen_sum, SUM(gen_n) AS gen_n,
+                           SUM(total_sum) AS total_sum,
+                           SUM(tps_sum) AS tps_sum, SUM(tps_n) AS tps_n,
+                           MAX(tps_max) AS tps_max, 0 AS usage_missing
+                    FROM requests_daily{clause}""",
+                params,
+            ).fetchone()
+        out = {k: (row[k] or 0) for k in
+               ("calls", "ok", "fail", "input_tokens", "output_tokens", "cached_tokens",
+                "fallback", "usage_missing")}
+        out["credit"] = float(row["credit"] or 0.0)
+        for k in ("ttft_sum", "ttft_n", "gen_sum", "gen_n", "total_sum",
+                  "tps_sum", "tps_n"):
+            out[k] = float(row[k] or 0)
+        out["tps_max"] = float(row["tps_max"] or 0) or None
+        return out
+
+    def _prev_stats(self, where: str, params: tuple, start: float | None = None,
+                    dims: dict | None = None) -> dict:
+        """上一个等长周期的同口径聚合（拿不到就返回空 dict，前端显示「—」）。
+
+        start/dims 透传联邦：对比周期早于滚动游标的部分从日聚合表并进来。
+        """
         try:
             if not where or not params:
                 return {}
             # where 形如 "ts >= ? AND ..."：把起点往前推一个区间长度即可
-            start = float(params[0])
-            span = max(1.0, time.time() - start)
+            start0 = float(params[0])
+            span = max(1.0, time.time() - start0)
             prev_where = "ts >= ? AND ts < ?" + (
                 (" AND " + where.split(" AND ", 1)[1]) if " AND " in where else ""
             )
-            prev_params = (start - span, start) + tuple(params[1:])
+            prev_params = (start0 - span, start0) + tuple(params[1:])
             data = self._stats_once(prev_where, prev_params)
+            if start is not None and dims is not None:
+                rolled_to = self._rolled_to()
+                day_from, day_to = self._federate_days(start0 - span, rolled_to)
+                if day_from is not None and start0 - span < rolled_to:
+                    daily = self._daily_stats(day_from, day_to,
+                                              model=dims.get("model", ""),
+                                              channel=dims.get("channel", ""))
+                    # 对比周期上限 start0 内的整日并入；边界误差 ≤1 天，宁缺勿重
+                    data = _merge_stats(data, daily, end_cap=min(start0, rolled_to))
             # 只留前端要用的几个，省得响应体翻倍
             keep = ("calls", "ok", "fail", "input_tokens", "output_tokens",
                     "cached_tokens", "fallback", "success_rate", "cache_hit_pct",
@@ -284,7 +489,7 @@ class UsageLog:
             return {}
 
     def _stats_once(self, where: str, params: tuple) -> dict:
-        """单次区间聚合（stats 与「上一周期」共用同一段 SQL，口径不可能漂）。"""
+        """单次区间聚合（行级，返回「可合并的和式表示」——均值的跨表合并靠它）。"""
         clause = f" WHERE {where}" if where else ""
         with closing(self._connect()) as conn:
             row = conn.execute(
@@ -299,32 +504,46 @@ class UsageLog:
                       SUM(CASE WHEN usage_missing = 1 THEN 1 ELSE 0 END) AS usage_missing,
                       SUM(CASE WHEN requested_model <> '' AND requested_model <> model
                                THEN 1 ELSE 0 END) AS fallback,
-                      AVG(ttft_ms)  AS avg_ttft_ms,
-                      AVG(gen_ms)   AS avg_gen_ms,
-                      AVG(total_ms) AS avg_total_ms,
-                      AVG(tokens_per_sec) AS avg_tps,
-                      MAX(tokens_per_sec) AS peak_tps
+                      SUM(COALESCE(ttft_ms, 0)) AS ttft_sum,
+                      SUM(CASE WHEN ttft_ms IS NOT NULL THEN 1 ELSE 0 END) AS ttft_n,
+                      SUM(COALESCE(gen_ms, 0)) AS gen_sum,
+                      SUM(CASE WHEN gen_ms IS NOT NULL THEN 1 ELSE 0 END) AS gen_n,
+                      SUM(COALESCE(total_ms, 0)) AS total_sum,
+                      SUM(COALESCE(tokens_per_sec, 0)) AS tps_sum,
+                      SUM(CASE WHEN tokens_per_sec IS NOT NULL THEN 1 ELSE 0 END) AS tps_n,
+                      MAX(tokens_per_sec) AS tps_max
                     FROM requests{clause}""",
                 params,
             ).fetchone()
-        out = dict(row)
-        for key in ("calls", "ok", "fail", "input_tokens", "output_tokens",
-                    "cached_tokens", "usage_missing", "fallback"):
-            out[key] = int(out.get(key) or 0)
-        out["credit"] = float(out.get("credit") or 0.0)
-        done = out["ok"] + out["fail"]
-        out["success_rate"] = round(out["ok"] * 100.0 / done, 1) if done else None
-        prompt_all = out["input_tokens"] + out["cached_tokens"]
-        out["cache_hit_pct"] = (
-            round(out["cached_tokens"] * 100.0 / prompt_all, 1) if prompt_all else None
-        )
-        for key in ("avg_ttft_ms", "avg_gen_ms", "avg_total_ms", "avg_tps", "peak_tps"):
-            out[key] = round(out[key], 1) if out.get(key) is not None else None
-        return out
+        out = {k: int(row[k] or 0) for k in
+               ("calls", "ok", "fail", "input_tokens", "output_tokens",
+                "cached_tokens", "usage_missing", "fallback", "ttft_n", "gen_n", "tps_n")}
+        for k in ("ttft_sum", "gen_sum", "total_sum", "tps_sum"):
+            out[k] = float(row[k] or 0)
+        out["credit"] = float(row["credit"] or 0.0)
+        out["tps_max"] = float(row["tps_max"] or 0) or None
+        return _finalize(out)
+
+    def fallbacks(self, where: str = "", params: tuple = (), limit: int = 50) -> list[dict]:
+        """换模型明细：区间内 requested_model ≠ 实际 model 的请求，最新在前。"""
+        base = f"({where}) AND " if where else ""
+        clause = f" WHERE {base}requested_model <> '' AND requested_model <> model"
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                f"""SELECT ts, account, requested_model, model, outcome, switches
+                    FROM requests{clause} ORDER BY ts DESC LIMIT ?""",
+                (*params, max(1, min(int(limit), 200))),
+            ).fetchall()
+        return [self._decode(dict(r)) for r in rows]
 
     def group_by(self, column: str, where: str = "", params: tuple = (),
-                 limit: int = 50) -> list[dict]:
-        """按账号 / 模型分组：调用数、成败、token、首字、tok/s。"""
+                 limit: int = 50, start: float | None = None,
+                 dims: dict | None = None) -> list[dict]:
+        """按账号 / 模型分组：调用数、成败、token、首字、tok/s。
+
+        column='model' 且给出联邦参数时，3 天前的份额从日聚合表并进来
+        （时延均值只来自近期行，历史行没有时延样本）。账号分组不联邦。
+        """
         if column not in ("account", "model", "mode", "endpoint", "outcome", "channel"):
             raise ValueError(f"不支持的分组列: {column}")
         clause = f" WHERE {where}" if where else ""
@@ -354,27 +573,126 @@ class UsageLog:
             item["avg_ttft_ms"] = round(item["avg_ttft_ms"], 1) if item.get("avg_ttft_ms") is not None else None
             item["avg_tps"] = round(item["avg_tps"], 1) if item.get("avg_tps") is not None else None
             out.append(item)
+        # 模型分组联邦：把 3 天前的日聚合份额并进对应模型行（时延均值保持近期口径）
+        if column == "model" and start is not None and dims is not None:
+            rolled_to = self._rolled_to()
+            day_from, day_to = self._federate_days(start, rolled_to)
+            if day_from is not None:
+                daily = self._daily_group_model(day_from, day_to,
+                                                channel=dims.get("channel", ""))
+                by_name = {item["name"]: item for item in out}
+                for name, d in daily.items():
+                    item = by_name.get(name)
+                    if item is None:
+                        item = {"name": name, "calls": 0, "ok": 0, "fail": 0,
+                                "input_tokens": 0, "output_tokens": 0,
+                                "cached_tokens": 0, "avg_ttft_ms": None,
+                                "avg_tps": None, "last_ts": None,
+                                "success_rate": None}
+                        out.append(item)
+                        by_name[name] = item
+                    for k in ("calls", "ok", "fail", "input_tokens",
+                              "output_tokens", "cached_tokens"):
+                        item[k] = int(item.get(k) or 0) + int(d.get(k) or 0)
+                    done = item["ok"] + item["fail"]
+                    item["success_rate"] = (
+                        round(item["ok"] * 100.0 / done, 1) if done else None)
+            out.sort(key=lambda x: int(x.get("calls") or 0), reverse=True)
         return out
 
-    def series(self, where: str = "", params: tuple = (), buckets: int = 24) -> list[dict]:
-        """按小时分桶的时序（Token / 请求数 / 吞吐量，一次查全，前端切换指标不再打请求）。
-
-        `hour` 是 epoch 秒整除 3600，前端自己转本地时间——服务端不做时区假设。
-        """
-        clause = f" WHERE {where}" if where else ""
+    def _daily_group_model(self, day_from: int, day_to: int,
+                           channel: str = "") -> dict[str, dict]:
+        clause = " WHERE day >= ? AND day <= ?"
+        params: list = [day_from, day_to]
+        if channel in ("public", "local"):
+            clause += " AND channel = ?"
+            params.append(channel)
         with closing(self._connect()) as conn:
             rows = conn.execute(
-                f"""SELECT CAST(ts / 3600 AS INTEGER) AS hour,
-                          COUNT(*) AS calls,
-                          SUM(CASE WHEN outcome <> 'completed' THEN 1 ELSE 0 END) AS fail,
-                          SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0))
-                              AS tokens,
-                          SUM(COALESCE(cached_tokens, 0)) AS cached_tokens,
-                          SUM(COALESCE(output_tokens, 0)) AS output_tokens,
-                          AVG(tokens_per_sec) AS tps
-                    FROM requests{clause}
-                    GROUP BY hour ORDER BY hour DESC LIMIT ?""",
-                (*params, max(1, min(int(buckets), 240))),
+                f"""SELECT model AS name, SUM(calls) AS calls, SUM(ok) AS ok,
+                           SUM(fail) AS fail, SUM(input_tokens) AS input_tokens,
+                           SUM(output_tokens) AS output_tokens,
+                           SUM(cached_tokens) AS cached_tokens
+                    FROM requests_daily{clause} GROUP BY model""",
+                params,
+            ).fetchall()
+        return {r["name"]: dict(r) for r in rows}
+
+    def series(self, where: str = "", params: tuple = (), buckets: int = 24,
+               start: float | None = None, dims: dict | None = None) -> list[dict]:
+        """时序（Token / 请求数 / 吞吐量，一次查全，前端切换指标不再打请求）。
+
+        自适应粒度：start 早于滚动游标（即查询跨度覆盖了已进日聚合表的老数据）
+        时返回「日桶」（granularity='day'，bucket=本地 0 点 epoch 秒），否则维持
+        「时桶」（granularity='hour'，bucket=epoch 秒整除 3600）。前端按
+        granularity 选标签格式（日 → MM-DD，时 → HH:MM）。
+        """
+        clause = f" WHERE {where}" if where else ""
+        rolled_to = self._rolled_to()
+        if start is None or dims is None or start >= rolled_to:
+            with closing(self._connect()) as conn:
+                rows = conn.execute(
+                    f"""SELECT CAST(ts / 3600 AS INTEGER) * 3600 AS bucket,
+                              'hour' AS granularity,
+                              COUNT(*) AS calls,
+                              SUM(CASE WHEN outcome <> 'completed' THEN 1 ELSE 0 END) AS fail,
+                              SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0))
+                                  AS tokens,
+                              SUM(COALESCE(cached_tokens, 0)) AS cached_tokens,
+                              SUM(COALESCE(output_tokens, 0)) AS output_tokens,
+                              AVG(tokens_per_sec) AS tps
+                        FROM requests{clause}
+                        GROUP BY bucket ORDER BY bucket DESC LIMIT ?""",
+                    (*params, max(1, min(int(buckets), 240))),
+                ).fetchall()
+            out = []
+            for r in reversed(rows):
+                item = dict(r)
+                item["tps"] = round(item["tps"], 1) if item.get("tps") is not None else None
+                out.append(item)
+            return out
+
+        # 日桶：日聚合表（≤ 游标）∪ 未滚动行（> 游标，含 start 边界日）
+        tz = time.timezone
+        day_from, _ = self._federate_days(start, rolled_to)
+        if day_from is None:
+            day_from = int((start + tz) // 86400) * 86400 - tz
+        dim_m, dim_c = dims.get("model", ""), dims.get("channel", "")
+        dim_sql = ""
+        dim_params: list = []
+        if dim_m:
+            dim_sql += " AND model = ?"
+            dim_params.append(dim_m)
+        if dim_c in ("public", "local"):
+            dim_sql += " AND channel = ?"
+            dim_params.append(dim_c)
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                f"""SELECT day AS bucket, 'day' AS granularity,
+                           SUM(calls) AS calls, SUM(fail) AS fail,
+                           SUM(input_tokens + output_tokens) AS tokens,
+                           SUM(cached_tokens) AS cached_tokens,
+                           SUM(output_tokens) AS output_tokens,
+                           CASE WHEN SUM(tps_n) > 0
+                                THEN SUM(tps_sum) / SUM(tps_n) ELSE NULL END AS tps
+                    FROM requests_daily
+                    WHERE day >= ? AND day <= ?{dim_sql}
+                    GROUP BY day
+                    UNION ALL
+                    SELECT CAST((ts + ?) / 86400 AS INTEGER) * 86400 - ? AS bucket,
+                           'day' AS granularity,
+                           COUNT(*) AS calls,
+                           SUM(CASE WHEN outcome <> 'completed' THEN 1 ELSE 0 END) AS fail,
+                           SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)) AS tokens,
+                           SUM(COALESCE(cached_tokens, 0)) AS cached_tokens,
+                           SUM(COALESCE(output_tokens, 0)) AS output_tokens,
+                           AVG(tokens_per_sec) AS tps
+                    FROM requests
+                    WHERE ts > ? AND ts >= ?{dim_sql}
+                    GROUP BY bucket
+                    ORDER BY bucket""",
+                (day_from, int((rolled_to + tz) // 86400) * 86400 - tz, *dim_params,
+                 tz, tz, rolled_to, start, *dim_params),
             ).fetchall()
         out = []
         for r in reversed(rows):
@@ -387,21 +705,33 @@ class UsageLog:
         """最近 N 天每日请求数（看板「活动热力图」/ 年度回溯用）。
 
         按本地日期切分：用户看到的是自己日历上的「哪一天」。
+        数据源 = 日聚合表（3 天前，永久）∪ 未滚动行（最近 3 天），合并成完整日历。
         """
         days = max(7, min(int(days), 370))
         since = time.time() - days * 86400
+        tz = time.timezone
+        since_day = int((since + tz) // 86400) * 86400 - tz
+        rolled_to = self._rolled_to()
         with closing(self._connect()) as conn:
             rows = conn.execute(
-                """SELECT CAST((ts + ?) / 86400 AS INTEGER) AS day_index,
-                          COUNT(*) AS calls,
-                          SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)) AS tokens
-                   FROM requests WHERE ts >= ? GROUP BY day_index ORDER BY day_index""",
-                (-time.timezone, since),
+                """SELECT day, SUM(calls) AS calls, SUM(tokens) AS tokens
+                   FROM (
+                     SELECT day, calls,
+                            input_tokens + output_tokens AS tokens
+                     FROM requests_daily WHERE day >= ?
+                     UNION ALL
+                     SELECT CAST(strftime('%s', CAST(ts AS INTEGER), 'unixepoch',
+                                         'localtime', 'start of day') AS INTEGER) AS day,
+                            COUNT(*) AS calls,
+                            SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)) AS tokens
+                     FROM requests WHERE ts > ? AND ts >= ? GROUP BY day
+                   ) GROUP BY day ORDER BY day""",
+                (since_day, rolled_to, since),
             ).fetchall()
-        # day_index → 本地日期（0 点 epoch 秒），前端直接用
+        # day = 本地 0 点 epoch 秒，前端直接用
         return [
-            {"day": int(r["day_index"]) * 86400 + time.timezone,
-             "calls": int(r["calls"]), "tokens": int(r["tokens"] or 0)}
+            {"day": int(r["day"]), "calls": int(r["calls"]),
+             "tokens": int(r["tokens"] or 0)}
             for r in rows
         ]
 
@@ -411,6 +741,42 @@ class UsageLog:
             conn.execute("DELETE FROM requests")
             conn.commit()
         return int(n)
+
+
+def _finalize(out: dict) -> dict:
+    """和式 → 面板口径（成功率/缓存命中/均值由和与计数现算）。"""
+    out["calls"] = int(out.get("calls") or 0)
+    for k in ("ok", "fail", "input_tokens", "output_tokens", "cached_tokens",
+              "usage_missing", "fallback", "ttft_n", "gen_n", "tps_n"):
+        out[k] = int(out.get(k) or 0)
+    out["credit"] = float(out.get("credit") or 0.0)
+    done = out["ok"] + out["fail"]
+    out["success_rate"] = round(out["ok"] * 100.0 / done, 1) if done else None
+    prompt_all = out["input_tokens"] + out["cached_tokens"]
+    out["cache_hit_pct"] = (
+        round(out["cached_tokens"] * 100.0 / prompt_all, 1) if prompt_all else None
+    )
+    out["avg_ttft_ms"] = round(out["ttft_sum"] / out["ttft_n"], 1) if out.get("ttft_n") else None
+    out["avg_gen_ms"] = round(out["gen_sum"] / out["gen_n"], 1) if out.get("gen_n") else None
+    out["avg_total_ms"] = round(out["total_sum"] / out["gen_n"], 1) \
+        if out.get("gen_n") and out.get("total_sum") else None
+    out["avg_tps"] = round(out["tps_sum"] / out["tps_n"], 1) if out.get("tps_n") else None
+    out["peak_tps"] = round(out["tps_max"], 1) if out.get("tps_max") else None
+    return out
+
+
+def _merge_stats(a: dict, b: dict) -> dict:
+    """两个「和式表示」合并（行级 + 日聚合 → 全量视图）。"""
+    out = dict(a)
+    for k in ("calls", "ok", "fail", "input_tokens", "output_tokens", "cached_tokens",
+              "usage_missing", "fallback", "ttft_n", "gen_n", "tps_n"):
+        out[k] = int(out.get(k) or 0) + int(b.get(k) or 0)
+    for k in ("credit", "ttft_sum", "gen_sum", "total_sum", "tps_sum"):
+        out[k] = float(out.get(k) or 0) + float(b.get(k) or 0)
+    m = max(float(a.get("tps_max") or 0), float(b.get("tps_max") or 0))
+    out["tps_max"] = m or None
+    return _finalize(out)
+
 
 
 def _normalize(key: str, value):

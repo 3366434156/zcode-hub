@@ -55,7 +55,8 @@ DB_PATH = DATA_DIR / "accounts.db"
 # 单独一个库：写入频率远高于账号库，且需要独立保留策略与聚合查询
 USAGE_DB_PATH = _resolve_path("ZCODE_USAGE_DB", str(DATA_DIR / "usage.db"))
 # 台账保留：先按天数裁，再按行数裁（0 = 该轴不限）
-USAGE_RETENTION_DAYS = _int("ZCODE_USAGE_RETENTION_DAYS", 30)
+# 请求明细只保留 3 天（Token/成败统计在清理前滚动进日聚合表 requests_daily，永久保留）
+USAGE_RETENTION_DAYS = _int("ZCODE_USAGE_RETENTION_DAYS", 3)
 USAGE_MAX_ROWS = _int("ZCODE_USAGE_MAX_ROWS", 50_000)
 # 前端目录（前后端分离）：默认仓库根 frontend/，可用 ZCODE_FRONTEND_DIR 指向
 # 独立部署目录（线上 /data/zcode-hub/frontend）；包内 statics 仅作兜底
@@ -294,7 +295,7 @@ OAUTH_API_BASE = os.getenv("ZCODE_OAUTH_API_BASE", constants.ZCODE_ORIGIN + "/ap
 ZAI_EXCHANGE_ORIGIN = os.getenv("ZCODE_EXCHANGE_ORIGIN", constants.ZAI_API_ORIGIN)
 
 USER_AGENT = os.getenv("UPSTREAM_USER_AGENT", constants.USER_AGENT)
-APP_VERSION = "2.14.0"
+APP_VERSION = "2.15.0"
 
 _FRONTEND_VERSION_FILE = FRONTEND_DIR / "version"
 

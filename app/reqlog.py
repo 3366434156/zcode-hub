@@ -257,6 +257,12 @@ def snapshot() -> list[dict]:
         return [dict(e) for e in reversed(_entries)]
 
 
+def inflight_count() -> int:
+    """当前正在请求中的数量（看板「进行中」徽章的数据源）。"""
+    with _lock:
+        return len(_inflight)
+
+
 def clear() -> None:
     """清空实时环与持久台账（面板「清空」按钮）。"""
     with _lock:

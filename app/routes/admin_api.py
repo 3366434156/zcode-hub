@@ -924,7 +924,8 @@ def _usage_filter(range_key: str, outcome: str, account: str, model: str,
 @router.get("/monitoring")
 async def monitoring():
     """实时视图：内存环（含进行中，重启清零）。明细/聚合请用 /usage。"""
-    return {"entries": reqlog.snapshot(), "keep": reqlog.KEEP}
+    return {"entries": reqlog.snapshot(), "keep": reqlog.KEEP,
+            "inflight": reqlog.inflight_count()}
 
 
 @router.get("/usage")
@@ -941,6 +942,11 @@ async def usage(range: str = "today", outcome: str = "all", account: str = "",
     """
     usagelog.flush()   # 让刚结束的请求当场可见（写入是异步批量的）
     where, params = _usage_filter(range, outcome, account, model, q, channel)
+    start = _range_start(range)
+    # 联邦维度：带账号/关键词过滤的查询不联邦（日聚合表没有这两个粒度）
+    dims = None
+    if not account and not q and outcome in ("", "all", "fail", "completed"):
+        dims = {"model": model, "channel": channel if channel in ("public", "local") else ""}
     # 来源对比必须忽略 channel 筛选本身，否则筛了公网就只剩公网一栏
     base_where, base_params = _usage_filter(range, outcome, account, model, q, "")
     rows, total = usagelog.query(where, params, limit=limit, offset=offset)
@@ -949,12 +955,14 @@ async def usage(range: str = "today", outcome: str = "all", account: str = "",
         "total": total,
         "limit": max(1, min(int(limit), usagelog.MAX_PAGE)),
         "offset": max(0, int(offset)),
-        "stats": usagelog.stats(where, params),
+        "stats": usagelog.stats(where, params, start=start, dims=dims),
         "by_account": usagelog.group_by("account", where, params),
-        "by_model": usagelog.group_by("model", where, params),
+        "by_model": usagelog.group_by("model", where, params, start=start, dims=dims),
         "by_endpoint": usagelog.group_by("endpoint", where, params),
         "by_channel": usagelog.group_by("channel", base_where, base_params),
-        "series": usagelog.series(where, params),
+        "series": usagelog.series(where, params, start=start, dims=dims),
+        "fallbacks": usagelog.fallbacks(where, params, limit=50),
+        "retention_days": settings.USAGE_RETENTION_DAYS,
         "heatmap": usagelog.heatmap(heatmap_days),
     }
 

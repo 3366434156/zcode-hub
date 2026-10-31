@@ -47,6 +47,46 @@ class TunnelError(RuntimeError):
     """隧道无法启动（找不到 cloudflared、token 缺失等用户可修正的原因）。"""
 
 
+def _kill_stale_orphans(port: int, keep_pid: int | None = None) -> int:
+    """清掉指向本网关端口、但不归当前管理的 cloudflared 孤儿进程。
+
+    历史 quick 隧道的进程在停止/重启循环中可能未被收尸——每条孤儿隧道都是
+    一条仍然可用的公网入口（安全隐患）。只按「命令行含本端口转发参数」匹配，
+    绝不动指向其它端口的隧道（别的服务可能也在用 cloudflared）。
+    返回清掉的数量。
+    """
+    if os.name != "nt":
+        return 0
+    import json as _json
+    pattern = f"*--url*127.0.0.1:{port}*"
+    cmd = (
+        "Get-CimInstance Win32_Process -Filter \"Name='cloudflared.exe'\" "
+        f"| Where-Object {{ $_.CommandLine -like '{pattern}' }} "
+        "| Select-Object ProcessId"
+    )
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", cmd],
+            capture_output=True, text=True, timeout=15,
+            creationflags=_CREATE_NO_WINDOW,
+        )
+        pids = [int(x) for x in re.findall(r"(\d+)", out.stdout or "")]
+    except Exception:
+        return 0
+    killed = 0
+    for pid in pids:
+        if keep_pid is not None and pid == keep_pid:
+            continue
+        try:
+            subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                           capture_output=True, timeout=10,
+                           creationflags=_CREATE_NO_WINDOW)
+            killed += 1
+        except Exception:
+            pass
+    return killed
+
+
 class _Tunnel:
     def __init__(self) -> None:
         self._lock = threading.RLock()
@@ -149,6 +189,7 @@ class _Tunnel:
         with self._lock:
             if self._running and self._proc and self._proc.poll() is None:
                 return self.status()
+            _kill_stale_orphans(settings.PORT)  # 防叠加：拉起新隧道前清掉历史孤儿
             if persist:
                 store.set_setting("tunnel_mode", mode)
                 store.set_setting("tunnel_enabled", "1")
@@ -184,6 +225,10 @@ class _Tunnel:
                 pass
         if self._thread and self._thread.is_alive() and self._thread is not threading.current_thread():
             self._thread.join(timeout=5)
+        # 收尸：历史开/关循环留下的孤儿隧道仍在把公网流量转进网关（安全隐患）
+        killed = _kill_stale_orphans(settings.PORT)
+        if killed:
+            logs.warn("tunnel", f"清理孤儿 cloudflared ×{killed}（历史残留的公网入口）")
         if was_running:
             logs.step("tunnel", "公网隧道已关闭")
         return self.status()

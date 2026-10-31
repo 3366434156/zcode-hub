@@ -5,6 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>zcode-hub · 数据看板</title>
   <link href="/static/css/app.css?v={{APP_VERSION}}" rel="stylesheet">
+  <style>
+    .st-queued{background:rgba(120,140,255,.15);color:#8ea2ff;padding:2px 8px;border-radius:10px;font-size:12px}
+    .st-dispatched{background:rgba(255,180,60,.15);color:#ffb43c;padding:2px 8px;border-radius:10px;font-size:12px}
+    .st-done{background:rgba(60,180,120,.15);color:#3cb478;padding:2px 8px;border-radius:10px;font-size:12px}
+    .st-failed{background:rgba(230,80,80,.15);color:#e65050;padding:2px 8px;border-radius:10px;font-size:12px}
+    .fb-table{width:100%;border-collapse:collapse;font-size:13px}
+    .fb-table th,.fb-table td{padding:8px 10px;text-align:left;border-bottom:1px solid rgba(255,255,255,.06)}
+    .fb-table th{color:#8b93a7;font-weight:600}
+    .fb-tag{color:#8b93a7;font-size:12px;margin-right:4px}
+  </style>
   <link href="/static/css/dashboard.css?v={{APP_VERSION}}" rel="stylesheet">
 </head>
 <body>
@@ -14,10 +24,11 @@
   <div class="page-hd">
     <div>
       <div class="page-title">数据看板</div>
-      <div class="page-sub" id="page-sub">每请求一行台账（SQLite 持久化，保留 30 天）· Token / 缓存命中 / 首字 / 生成速度 / 换号换模型</div>
+      <div class="page-sub" id="page-sub">每请求一行台账（SQLite 持久化 · 明细保留 3 天 · Token/成败统计按日聚合永久保留）· Token / 缓存命中 / 首字 / 生成速度 / 换号换模型</div>
     </div>
     <div class="page-actions">
       <span class="live-dot" id="live-dot">实时监控中</span>
+        <span class="page-action-btn" id="inflight-badge" style="display:none">进行中 <b id="inflight-n">0</b></span>
       <button onclick="refresh(true)" class="page-action-btn">刷新</button>
       <button onclick="clearAll()" class="page-action-btn">清空</button>
     </div>
@@ -80,7 +91,7 @@
       <div class="s" id="s-cache">—</div>
       <canvas class="spark" id="spark-cache" height="34"></canvas>
     </div>
-    <div class="kpi big">
+    <div class="kpi big" style="cursor:pointer" onclick="toggleFbDetail()" title="点击查看换模型明细">
       <div class="k"><span class="ic">⇋</span>换模型</div>
       <div class="v" id="k-fb">—</div>
       <div class="kdelta"><span class="delta" id="d-fb"></span></div>
@@ -112,6 +123,11 @@
         <div class="chartbox">
           <canvas id="series-canvas" height="176"></canvas>
         </div>
+      </div>
+
+      <div class="settings-card" id="fb-detail-card" style="display:none">
+        <div class="section-title" style="margin-bottom:8px">换模型明细（客户端请求 → 实际服务的模型）</div>
+        <div id="fb-detail-body"><div class="hint">加载中…</div></div>
       </div>
     </section>
 
@@ -217,6 +233,18 @@ const OUTCOME_LABEL = {completed:'成功', failed:'失败', client_aborted:'客�
 const STREAM_TITLE = '流式（SSE 逐块下发；非流式是一次性整段返回）';
 
 function $(id){return document.getElementById(id);}
+/* 内容/错误列：错误红显；正文按来源打标（系统注入/工具回传/用户消息），单行截断，悬停看全文 */
+function contentCell(e){
+  const err=String(e.error||'').replace(/\s+/g,' ').trim();
+  if(e.ok===false&&err)return `<span class="err-line" title="${esc(err)}">✗ ${esc(err.slice(0,110))}</span>`;
+  const raw=String(e.preview||'').replace(/\s+/g,' ').trim();
+  if(!raw)return '—';
+  let tag='用户消息';
+  if(/<system-reminder>|<system_warning>|<permission/i.test(raw))tag='系统注入';
+  else if(/tool_use_id|"type"\s*:\s*"tool_result"/.test(raw))tag='工具回传';
+  else if(/^[{\[]/.test(raw))tag='JSON';
+  return `<span class="fb-tag">【${tag}】</span>${esc(raw.slice(0,72))}${raw.length>72?'…':''}`;
+}
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 
 (async()=>{
@@ -271,10 +299,35 @@ async function refresh(reset){
     ]);
     state.usage = u;
     state.live = (live.entries || []);
+    {const nIn=live.inflight||0;
+     const b=document.getElementById('inflight-badge');
+     if(b){b.style.display=nIn>0?'inline-block':'none';
+           document.getElementById('inflight-n').textContent=nIn;}}
     $('live-cnt').textContent = state.live.filter(e=>e.ok===null).length;
     renderKpis(); renderChannels(); renderSeries(); renderHeatmap(); renderTable(); renderRecent();
+    renderFbDetail();
+    {const nIn=(state.live?0:0, (typeof _lastInflight!=='undefined')?_lastInflight:0);}
     $('live-dot').textContent = '实时监控中 · ' + new Date().toLocaleTimeString('zh-CN',{hour12:false});
   }catch(e){ showToast('加载失败: '+e.message, 'error'); }
+}
+
+function toggleFbDetail(){
+  const c=document.getElementById('fb-detail-card');
+  const show=c.style.display==='none';
+  c.style.display=show?'block':'none';
+  if(show)renderFbDetail();
+}
+function renderFbDetail(){
+  const box=document.getElementById('fb-detail-body');
+  const rows=(state.usage&&state.usage.fallbacks)||[];
+  if(!rows.length){box.innerHTML='<div class="hint">这个区间没有换模型记录——只有「请求的模型」被上游判额度用尽/不在套餐时才会自动切换。</div>';return;}
+  box.innerHTML=`<table class="fb-table"><thead><tr><th>时间</th><th>账号</th><th>请求 → 实际</th><th>结果</th></tr></thead><tbody>
+    ${rows.map(r=>`<tr>
+      <td class="hint">${new Date(r.ts*1000).toLocaleString('zh-CN')}</td>
+      <td>${esc(r.account||'—')}</td>
+      <td><code>${esc(r.requested_model)}</code> → <b>${esc(r.model)}</b></td>
+      <td>${outcomeBadge(r.outcome,r.http_status)}</td>
+    </tr>`).join('')}</tbody></table>`;
 }
 
 function fmtNum(n){
@@ -413,6 +466,13 @@ function drawSpark(id, values, danger){
   ctx.fill();
 }
 
+function fmtBucket(r){
+  const d=new Date(r.bucket*1000);
+  return r.granularity==='day'
+    ? d.toLocaleDateString('zh-CN',{month:'2-digit',day:'2-digit'})
+    : d.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false});
+}
+
 function renderSeries(){
   const rows = state.usage?.series || [];
   const cv = $('series-canvas');
@@ -451,7 +511,7 @@ function renderSeries(){
     ctx.fillStyle='rgba(232,163,61,.75)';
     ctx.fillRect(padL + (plotW-bw)/2, padT + plotH - bh, bw, bh);
     ctx.fillStyle='#838794';
-    const only = new Date(rows[0].hour*3600000).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false});
+    const only = fmtBucket(rows[0]);
     ctx.fillText(only, padL, h-8);
     $('series-hint').textContent = `1 个时间桶（${only}）· 峰值 ${fmtNum(max)}`;
     return;
@@ -467,7 +527,7 @@ function renderSeries(){
   ctx.strokeStyle='#e8a33d'; ctx.lineWidth=1.8; ctx.lineJoin='round'; ctx.stroke();
   ctx.lineTo(padL+plotW, padT+plotH); ctx.lineTo(padL, padT+plotH); ctx.closePath();
   ctx.fillStyle='rgba(232,163,61,.10)'; ctx.fill();
-  const hourLabel = i => new Date(rows[i].hour*3600000).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false});
+  const hourLabel = i => fmtBucket(rows[i]);
   ctx.fillStyle='#838794';
   ctx.fillText(hourLabel(0), padL, h-8);
   const lastLabel = hourLabel(rows.length-1);
@@ -571,7 +631,7 @@ function renderDetail(wrap, u){
       <span class="mon-num" title="${e.cached_tokens!=null?`缓存命中 ${e.cached_tokens} tokens`:''}">${e.cache_hit_pct==null?'—':e.cache_hit_pct+'%'}</span>
       <span class="mon-num">${fmtTok(e.output_tokens)}</span>
       <span class="mon-num">${e.tokens_per_sec??'—'}</span>
-      <span class="mon-preview" title="${esc(e.error||e.preview||'')}">${e.ok===false&&e.error?`<span class="err-line">${esc(e.error)}</span>`:esc(e.preview||'—')}</span>
+      <span class="mon-preview" title="${esc(e.error||e.preview||'')}">${contentCell(e)}</span>
     </div>`).join('');
   wrap.innerHTML = `<div class="mon-table">${head}${body}</div>`;
   const total = u.total||0, pages = Math.ceil(total/(u.limit||100));
@@ -624,7 +684,7 @@ function renderLive(wrap){
       <span class="mon-num">${fmtTok(e.input_tokens)}</span>
       <span class="mon-num">${fmtTok(e.output_tokens)}</span>
       <span class="mon-num">${tps??'—'}</span>
-      <span class="mon-preview" title="${esc(e.error||e.preview||'')}">${e.ok===false&&e.error?`<span class="err-line">${esc(e.error)}</span>`:esc(e.preview||'—')}</span>
+      <span class="mon-preview" title="${esc(e.error||e.preview||'')}">${contentCell(e)}</span>
     </div>`;
   }).join('');
   wrap.innerHTML = `<div class="mon-table">${head}${body}</div>`;
