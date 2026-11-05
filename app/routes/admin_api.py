@@ -39,6 +39,22 @@ async def verify():
     return {"status": "ok"}
 
 
+@router.post("/shutdown")
+async def shutdown():
+    """本地优雅停服：uvicorn 停止接收新连接 → 等在飞请求结束 → 正常退出。
+
+    stop/restart 脚本先调它、超时才兜底强杀。直接 TerminateProcess 会给正在
+    流式输出的客户端发 RST，ZCode 侧表现为 `connection lost mid-reply`。
+    """
+    from .. import runtime
+
+    server = getattr(runtime, "server", None)
+    if server is None:
+        raise HTTPException(503, "当前启动方式不支持优雅停服（未持有 uvicorn.Server）")
+    server.should_exit = True
+    return {"ok": True, "draining": True}
+
+
 # ── 账号列表 + 概览统计 ──────────────────────────────────────────────────────
 @router.get("/accounts")
 async def list_accounts():
@@ -520,6 +536,8 @@ async def claim(payload: dict = Body(default=None)):
                              "ok": False, "message": str(err)})
             continue
         await refresh_accounts([acc])
+        logs.ok("claim", f"账号 {acc.name} 领取成功: "
+                         f"{result.get('plan_name') or plan_id or '最高优先级套餐'}")
         outcomes.append({"account_id": acc.id, "account_name": acc.name,
                          "ok": True, **result})
     ok = sum(1 for o in outcomes if o["ok"])
@@ -569,6 +587,8 @@ async def claim_manual(payload: dict = Body(...)):
                               "ok": False, "message": str(err)}],
                 "summary": {"ok": 0, "fail": 1}}
     await refresh_accounts([acc])
+    logs.ok("claim", f"账号 {acc.name} 领取成功: "
+                     f"{result.get('plan_name') or plan_id or '最高优先级套餐'}")
     return {"outcomes": [{"account_id": acc.id, "account_name": acc.name,
                           "ok": True, **result}],
             "summary": {"ok": 1, "fail": 0}}
@@ -974,9 +994,9 @@ async def monitoring_clear():
     return {"ok": True}
 
 
-# ── 续派监督开关（着色器项目 _sup 目录的文件开关，v0.2 语义）────────────────
-# enabled: continue.enabled 总闸；loop: continue.loop 循环模式；
-# prompt: next-prompt.txt 一次性指令（由 Stop 钩子消费后自动归档）。
+# ── 续派监督开关（_sup 目录的文件开关，v0.3 语义；由 Stop 钩子消费，与具体项目无关）
+# enabled: continue.enabled 总闸；sessions: continue.sessions 监听名单（硬性条件，
+# 空 = 整个功能不工作）；prompt: next-prompt.txt 一次性指令（钩子消费后自动归档）。
 
 from ..settings import SUP_DIR as _SUP_DIR  # data/_sup（续派监督文件协议）
 
@@ -987,6 +1007,20 @@ def _sup_read(name: str):
         return (pathlib.Path(_SUP_DIR) / name).read_text(encoding="utf-8").strip()
     except Exception:
         return None
+
+
+def _sup_log(tag: str, msg: str) -> None:
+    """后台操作也写进 hook.log，和 Stop 钩子的判定记录共用一条时间线。"""
+    import datetime
+    import pathlib
+    try:
+        sup = pathlib.Path(_SUP_DIR)
+        sup.mkdir(parents=True, exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        with (sup / "hook.log").open("a", encoding="utf-8") as fh:
+            fh.write(f"{ts} [{tag}] {msg}\n")
+    except OSError:
+        pass
 
 
 @router.get("/supervisor")
@@ -1001,11 +1035,97 @@ async def supervisor_status():
         pass
     return {
         "enabled": (sup / "continue.enabled").exists(),
-        "loop": (sup / "continue.loop").exists(),
         "prompt": _sup_read("next-prompt.txt"),
         "count": state.get("count", 0),
         "lastAt": state.get("lastAt", 0),
+        "last": state.get("last") or {},
+        "sessions": _read_sessions(),
+        "plugin": _zcode_plugin_state(),
+        "supDir": str(sup),
     }
+
+
+def _zcode_plugin_state() -> dict:
+    """读 ZCode 配置，报告 Stop 钩子插件是否启用（只读，不改用户配置）。
+
+    续派监督的消费端是插件 zcode-supervisor-continue 的 Stop 钩子；插件没启用
+    时，_sup 里开再多开关也不会有任何效果——后台必须能直接看到这一点。
+    """
+    import json as _json
+    import pathlib
+    out = {"enabled": None, "hookFile": "", "hookMtime": 0, "error": None}
+    try:
+        cfg = pathlib.Path.home() / ".zcode" / "cli" / "config.json"
+        data = _json.loads(cfg.read_text(encoding="utf-8"))
+        plugins = ((data.get("plugins") or {}).get("enabledPlugins") or {})
+        out["enabled"] = bool(plugins.get("zcode-supervisor-continue@ai-local-plugins"))
+    except Exception as err:  # noqa: BLE001 - 配置缺失/格式变化只报告，不阻断页面
+        out["error"] = str(err)
+    try:
+        root = (pathlib.Path.home() / ".zcode" / "cli" / "plugins" / "cache"
+                / "ai-local-plugins" / "zcode-supervisor-continue")
+        versions = sorted((p for p in root.glob("*") if p.is_dir()),
+                          key=lambda p: p.name)
+        if versions:
+            hook = versions[-1] / "hooks" / "continue.mjs"
+            out["hookFile"] = str(hook)
+            out["hookMtime"] = hook.stat().st_mtime if hook.exists() else 0
+    except OSError:
+        pass
+    return out
+
+
+@router.get("/sessions")
+async def zcode_sessions(limit: int = 80, q: str = ""):
+    """ZCode 本地会话列表（只读 db.sqlite），给「会话监控」勾选监听用。"""
+    from .. import zsession
+
+    try:
+        rows = zsession.list_sessions(limit=limit, q=q)
+    except Exception as err:  # noqa: BLE001 - 库不存在/被锁：页面展示错误而不是 500
+        return {"sessions": [], "db": str(zsession.DB_PATH), "error": str(err)}
+    return {"sessions": rows, "db": str(zsession.DB_PATH), "error": None}
+
+
+def _read_sessions() -> list[str]:
+    """会话监听名单：_sup/continue.sessions，一行一个 session id（# 注释忽略）。"""
+    raw = _sup_read("continue.sessions") or ""
+    return [ln.strip() for ln in raw.splitlines()
+            if ln.strip() and not ln.strip().startswith("#")]
+
+
+@router.post("/supervisor/sessions")
+async def supervisor_set_sessions(payload: dict = Body(...)):
+    """写会话监听名单。空列表 = 续派功能停用（钩子不会对任何会话续派）。"""
+    import pathlib
+    sup = pathlib.Path(_SUP_DIR)
+    sup.mkdir(parents=True, exist_ok=True)
+    items = []
+    for raw in payload.get("sessions") or []:
+        line = str(raw or "").strip()
+        if line and line not in items:
+            items.append(line)
+    (sup / "continue.sessions").write_text("\n".join(items) + ("\n" if items else ""),
+                                           encoding="utf-8")
+    shown = ", ".join(items[:5]) + ("…" if len(items) > 5 else "")
+    _sup_log("控制台", f"监听名单已保存：{len(items)} 个会话"
+             + (f"（{shown}）" if items else "（空 = 续派停用）"))
+    return {"ok": True, "sessions": items}
+
+
+@router.get("/supervisor/hooklog")
+async def supervisor_hook_log(lines: int = 60):
+    """Stop 钩子的自述日志（插件每次触发都写；排查「为什么没续派」的现场）。"""
+    import pathlib
+    path = pathlib.Path(_SUP_DIR) / "hook.log"
+    out = {"file": str(path), "mtime": 0, "lines": []}
+    try:
+        out["mtime"] = path.stat().st_mtime
+        text = path.read_text(encoding="utf-8", errors="replace")
+        out["lines"] = text.splitlines()[-max(1, min(int(lines), 300)):]
+    except OSError:
+        pass
+    return out
 
 
 @router.post("/supervisor/enabled")
@@ -1019,21 +1139,8 @@ async def supervisor_set_enabled(payload: dict = Body(...)):
         flag.write_text("", encoding="utf-8")
     elif not want and flag.exists():
         flag.rename(sup / f"continue.enabled.disabled-{_time.strftime('%Y%m%d-%H%M%S')}")
+    _sup_log("控制台", f"总闸{'开启' if flag.exists() else '关闭'}")
     return {"ok": True, "enabled": flag.exists()}
-
-
-@router.post("/supervisor/loop")
-async def supervisor_set_loop(payload: dict = Body(...)):
-    import pathlib
-    import time as _time
-    sup = pathlib.Path(_SUP_DIR)
-    flag = sup / "continue.loop"
-    want = bool(payload.get("loop", False))
-    if want and not flag.exists():
-        flag.write_text("", encoding="utf-8")
-    elif not want and flag.exists():
-        flag.rename(sup / f"continue.loop.disabled-{_time.strftime('%Y%m%d-%H%M%S')}")
-    return {"ok": True, "loop": flag.exists()}
 
 
 @router.post("/supervisor/prompt")
@@ -1046,4 +1153,5 @@ async def supervisor_set_prompt(payload: dict = Body(...)):
         flag.write_text(text + "\n", encoding="utf-8")
     elif flag.exists():
         flag.unlink()
+    _sup_log("控制台", f"下发一次性指令（{len(text)} 字）" if text else "清空待发指令")
     return {"ok": True, "prompt": text or None}

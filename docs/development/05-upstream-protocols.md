@@ -124,18 +124,31 @@ POST billing/claim     → 头: Bearer JWT + 验证码头 + X-Device-Mid + X-ZCo
                           ⚠️ entitlements[].effective_at 可能晚于领取时刻：2026-10-26 实测 19:54 领取、
                              23:00 才计入余额（billing/preview 的 grant 已可见，billing/balance 未计）。
                              额度面板此时仍显示旧窗口，属正常态，生效后刷新即变。
+                          ⚠️ 2026-11-02 复现：领取成功后 `billing/current` 只剩 `{"code":0}`（无 data），
+                             唯一证据是 `billing/balance` 的 `data.plans[]`（user_plan：status/
+                             starts_at/ends_at/entitlements[].effective_at）。只读 current 会让
+                             「已领取、23:00 生效」显示成「无套餐数据」，耗尽判定也看不到赠送池。
+                             `quota.fetch_quota` 已按 plan_id 合并两通道 plans（balance 字段优先）。
 前置: identity.appVersion ≥ 活动要求的最低客户端版本（否则 ineligible）
 ```
 
-版本口径（单一真相源 `app/constants.py`）：`CLIENT_APP_VERSION = BILLING_APP_VERSION = "3.16.3"`
-（钉的是**实证可用的请求形状版本**，不是「官方最新版」）。
-**活动投放按最低客户端版本门槛（见上「前置」行）**：2026-10-26 第二次复现——billing 端钉
-3.14.4 时 `billing/preview` 对所有账号恒空（`code:0 / data.plans:[]`，界面表现就是
-「领取失败：没有待领取的套餐」），同账号同一时刻改用 `app_version=3.16.3` 立刻返回
-`zcode-v3-start-plan-nt-1026`（300M GLM-5.3-Flash，priority 111）。因此两个版本常量
-已合成同源（`BILLING_APP_VERSION = CLIENT_APP_VERSION`）。
-⚠️ **不要盲目跟到官方最新发行版**（2026-10-30 23:00 实证，同一账号、同一配额窗口、
-同一 CLI 形态只换版本号）：
+版本口径（单一真相源 `app/constants.py`）：
+`CLIENT_APP_VERSION = "3.16.3"`（messages 的**实证可用请求形状**）；
+`BILLING_APP_VERSION = "3.17.2"`（billing 族跟官方桌面现行版，活动投放按最低客户端
+版本门槛）。**两者必须分开，不能再合成同源**：
+
+- 2026-10-26 第二次复现：billing 端钉 3.14.4 时 `billing/preview` 对所有账号恒空，
+  同账号同一时刻改用 `app_version=3.16.3` 立刻返回 `zcode-v3-start-plan-nt-1026`。
+- 2026-11-03 23:20 第三次复现（同账号、同设备）：billing 3.16.3 → preview 空、
+  claim 返回 `1004 no permission`；改成 3.17.1/3.17.2 → preview 立刻出现
+  `zcode-v3-start-plan-1103`（300M GLM-5.3-Flash），claim 成功。
+  当时界面表现就是「领取失败：不符合领取条件」，实际是 billing 版本太低。
+- `version_sync` 现在会**自动把 BILLING_APP_VERSION 跟到官方清单最新版**；
+  messages 的 `CLIENT_APP_VERSION` 仍钉 3.16.3，只有显式 `APP_VERSION_FOLLOW=1`
+  才跟进（默认关闭）。
+
+⚠️ **不要盲目把 messages 跟到官方最新发行版**（2026-10-30 23:00 实证，同一账号、
+同一配额窗口、同一 CLI 形态只换版本号）：
 
 | app_version | messages 结果 |
 |---|---|
@@ -143,13 +156,16 @@ POST billing/claim     → 头: Bearer JWT + 验证码头 + X-Device-Mid + X-ZCo
 | 3.17.1 | HTTP 405 `{"code":3012,"msg":"unusual activity"}`（整池 5 个账号全中，全部进风控冷却） |
 
 3.17.x 的官方 CLI 请求形状（UA 后缀 / 签名）变了，版本号不是唯一变量——跟着升只会把
-整池打进风控。所以版本策略是「形状优先，钉住可用的那个」。
+整池打进风控。所以 messages 的版本策略是「形状优先，钉住可用的那个」；billing 族
+（preview/claim/balance/current/usage/configs/event）按活动投放门槛跟官方现行版。
 
-版本巡检（`app/version_sync.py`，**默认只体检不跟进**）：`GET /api/v1/releases/electron/manifest`
-（免鉴权，electron-updater YAML，2026-10-30 实测 stable=3.17.1）是官方最新版权威来源
+版本巡检（`app/version_sync.py`）：`GET /api/v1/releases/electron/manifest`
+（免鉴权，electron-updater YAML，2026-11-02 实测 stable=3.17.2）是官方最新版权威来源
 （安装包内 `app-update.yml` 的 provider 被改写过 → localhost，不可依赖）。启动读
-`data/app_version.json` 里的上次巡检结果，之后每 6h 比对一次，不一致就 warn 并在
-`/admin/api/status` 的 `client_version` 暴露「钉版 effective / 官方最新 latest / 是否跟进 follow」。
+`data/app_version.json` 里的上次巡检结果，之后每 6h 比对一次：**billing 版本自动跟到
+官方最新**；messages 仍默认只体检、不跟进（`APP_VERSION_FOLLOW=1` 才跟进）。不一致时
+warn 并在 `/admin/api/status` 的 `client_version` 暴露「messages 钉版 effective /
+官方最新 latest / 是否跟进 follow」。
 `ZCODE_APP_VERSION_FOLLOW=1` 才真跟进（`constants.set_client_version()` 一次性改写
 UA / 版本头 / configs 查询串，只升不降）；开启前必须先用一个健康账号打一次 messages，
 确认不是 3012（验证方法就是上面那张表）。

@@ -224,6 +224,25 @@ def build_app() -> FastAPI:
         if stream:
             chunks = int(headers.get("x-mock-sse-chunks", 3))
             truncate_at = headers.get("x-mock-sse-truncate-at")
+            # 测试协议：sse_abort / sse_abort_after —— 模拟**真实断连**（不是
+            # 截断 body）：200 + SSE 头已发出后，流内抛错让 uvicorn 直接关闭
+            # 连接，客户端读到 incomplete chunked body。验证网关的透明重试。
+            if scenario in ("sse_abort", "sse_abort_after"):
+                prefix = ""
+                if scenario == "sse_abort_after":
+                    prefix = ('event: message_start\n'
+                              'data: {"type":"message_start","message":{"role":"assistant"}}\n\n')
+
+                async def _abort_stream(text: str = prefix):
+                    if text:
+                        yield text.encode("utf-8")
+                        await asyncio.sleep(0.05)
+                    raise RuntimeError("mock upstream stream abort")
+
+                return StreamingResponse(
+                    _abort_stream(), status_code=200, media_type="text/event-stream",
+                    headers={"x-mock-call-index": str(n), "cache-control": "no-cache"},
+                )
             # 测试协议：sse_thinking 打开时先发思考块（验证 reasoning_content 透传）；
             # sse_gap 让事件之间停顿，给网关的心跳（SSE 注释帧）留出空闲窗口
             if getattr(app.state, "sse_thinking", False):

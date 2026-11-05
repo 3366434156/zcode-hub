@@ -39,6 +39,19 @@ def log(line: str) -> None:
         pass
 
 
+def port_serving(port: int) -> bool:
+    """端口上是否已经有网关在服务（有监听就算）。
+
+    用途：防止「重复启动」变成 crash loop——后起的守护抢不到端口时，
+    子进程会以 code=3（10048 地址占用）秒退，旧逻辑会一直退避重试刷屏。
+    """
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.3)
+        return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="zcode-hub 守护进程")
     parser.add_argument("--port", type=int, default=3000)
@@ -53,7 +66,16 @@ def main() -> int:
 
     log(f"supervisor 启动：port={args.port} python={python}")
 
+    if port_serving(args.port):
+        log(f"端口 {args.port} 上已有网关在服务——本守护不重复拉起，直接退出。"
+            f"（要重启请用 restart-zcode-proxy.bat，它会先停掉旧实例）")
+        return 0
+
     while restarts < args.max_restarts:
+        # 每次重试前再确认一次：可能是别的实例已经起来了
+        if port_serving(args.port):
+            log(f"端口 {args.port} 已被其他网关实例占用，停止重试（避免抢端口 crash loop）")
+            return 0
         started = time.time()
         log(f"启动网关（第 {restarts + 1} 次）")
         try:
@@ -70,11 +92,12 @@ def main() -> int:
             log(f"启动异常: {err}")
 
         uptime = time.time() - started
-        # 正常退出（0）或跑了很久才退：不退避，立即重启——用户可能就是手动关的
+        # 正常退出（0）或跑了很久才退：不退避，立即重启——用户可能就是手动关的。
+        # 重启预算只在「短命 + 异常退出」时消耗，否则手动重启几十次就会把守护耗尽。
         if code == 0 or uptime > 300:
             log(f"网关退出 code={code} 存活 {uptime:.0f}s（长跑/正常退出，立即重启）")
             backoff = 2.0
-            restarts += 1
+            restarts = 0
             continue
 
         restarts += 1

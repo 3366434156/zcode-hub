@@ -49,7 +49,15 @@ def cmd_serve(args: list[str]) -> None:
     settings.PORT = port
     import uvicorn
 
-    uvicorn.run("app.main:app", host=settings.HOST, port=port, log_level="info")
+    from app import runtime
+
+    # 手动持有 Server 实例：/admin/api/shutdown 通过 should_exit 触发优雅停服
+    #（uvicorn.run 内部实例不可达；Stop-Process 强杀会把在飞流式连接打成 RST）
+    config = uvicorn.Config("app.main:app", host=settings.HOST, port=port,
+                            log_level="info")
+    server = uvicorn.Server(config)
+    runtime.server = server
+    server.run()
 
 
 # ── login ────────────────────────────────────────────────────────────────────

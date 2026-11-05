@@ -68,9 +68,9 @@ FRONTEND_DIR = _resolve_path(
 # 落盘是为了「进程死后还能查案」：自动关闭、上游异常、被谁打了请求，都在文件里。
 LOG_RETENTION_DAYS = _int("ZCODE_LOG_RETENTION_DAYS", 14)
 
-# ── 续派监督（Stop 钩子 v0.2 的文件协议）────────────────────────────────────
+# ── 续派监督（Stop 钩子 v0.3 的文件协议）────────────────────────────────────
 # 钩子（zcode-supervisor-continue 插件）每回合结束读写这里的开关与一次性指令。
-# continue.enabled 总闸 / continue.loop 循环 opt-in / next-prompt.txt 一次性指令。
+# continue.enabled 总闸 / continue.sessions 监听名单（必需）/ next-prompt.txt 一次性指令。
 SUP_DIR = DATA_DIR / "_sup"
 
 # ── 服务 ─────────────────────────────────────────────────────────────────────
@@ -163,12 +163,22 @@ RETRY_429_WAIT_MAX = _int("ZCODE_RETRY_429_WAIT_MAX", 120)  # Retry-After 采信
 # 5xx 等一般错误：重试，耗尽后账号冷却 COOLING_SECONDS 并换下一个账号
 RETRY_5XX_TIMES = _int("ZCODE_RETRY_5XX_TIMES", 3)       # 5xx 重试次数
 RETRY_5XX_WAIT = _int("ZCODE_RETRY_5XX_WAIT", 5)         # 5xx 重试等待秒数
+# 流式请求：上游在 SSE 中途断开（incomplete chunked read）且**尚未向客户端
+# 输出任何内容**时，整条重新调度（可换号/换连接）的次数。已经出过内容的流
+# 不能重试（会重复输出），只能显式发 error 帧收口。
+STREAM_RETRY_TIMES = _int("ZCODE_STREAM_RETRY_TIMES", 2)
 # 限流（cooling）冷却时长（秒）——仅 5xx 重试耗尽 / 连接失败使用
 COOLING_SECONDS = _int("ZCODE_COOLING_SECONDS", 300)
+# 全池 5xx 冷却时的半开探测间隔（秒）：每 N 秒放一个真实请求试探上游是否恢复，
+# 避免一次 5xx 抖动把整池冻满 COOLING_SECONDS（实测 2026-11-02 23:44 空窗 5 分钟）。
+COOLING_PROBE_INTERVAL = _int("ZCODE_COOLING_PROBE_INTERVAL", 30)
 # 风控（3012/405「unusual activity」）指数退避冷却：实测为频道级瞬时频控
 #（同号同刻 billing 正常、数小时自愈），冷却自动恢复；累计 RISK_BAN_STRIKES
 # 次才升级为禁用（人工恢复）。冷却期零上游流量（is_cooling 全通道门禁）。
-RISK_COOLDOWN_BASE = _int("ZCODE_RISK_COOLDOWN_BASE", 900)    # 首次冷却秒数
+# ⚠️ 2026-11-04 实证：900s(15min) 与 1800s(30min) 两次探回**都还是 405**，
+# 说明上游实际封禁时长长于 30 分钟。过早探回不只是失败，还会让 strikes 累加
+# （4 次即整池禁用），所以基线提到 1 小时；翻倍退避上限仍 24h。
+RISK_COOLDOWN_BASE = _int("ZCODE_RISK_COOLDOWN_BASE", 3600)   # 首次冷却秒数
 RISK_COOLDOWN_MAX = _int("ZCODE_RISK_COOLDOWN_MAX", 86400)    # 冷却上限（24h）
 RISK_BAN_STRIKES = _int("ZCODE_RISK_BAN_STRIKES", 4)          # 窗口内累计命中达到即禁用
 RISK_STRIKE_DECAY_SECONDS = _int("ZCODE_RISK_STRIKE_DECAY_SECONDS", 7 * 86400)
@@ -295,7 +305,7 @@ OAUTH_API_BASE = os.getenv("ZCODE_OAUTH_API_BASE", constants.ZCODE_ORIGIN + "/ap
 ZAI_EXCHANGE_ORIGIN = os.getenv("ZCODE_EXCHANGE_ORIGIN", constants.ZAI_API_ORIGIN)
 
 USER_AGENT = os.getenv("UPSTREAM_USER_AGENT", constants.USER_AGENT)
-APP_VERSION = "2.15.0"
+APP_VERSION = "2.19.5"
 
 _FRONTEND_VERSION_FILE = FRONTEND_DIR / "version"
 

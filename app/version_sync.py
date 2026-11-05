@@ -162,6 +162,9 @@ class VersionSync:
             return
         self.latest = version
         _save_version(version)
+        # billing 族必须跟官方桌面现行版（活动套餐按版本门槛投放）；messages
+        # 的 CLIENT_APP_VERSION 仍按钉版，只有显式 APP_VERSION_FOLLOW 才动。
+        constants.set_billing_version(version)
         if settings.APP_VERSION_FOLLOW and self.adopt(version):
             return
         if version == self.current:
@@ -188,10 +191,11 @@ class VersionSync:
                 continue
 
     def start(self) -> None:
-        """启动后台巡检轮（幂等）。只读清单，不改版本（除非显式开启跟进）。"""
+        """启动后台巡检轮（幂等）。billing 版本跟已记录的官方版；messages 不动。"""
         saved = load_saved_version()
         if saved:
             self.latest = saved
+            constants.set_billing_version(saved)
         if self._task is None or self._task.done():
             self._stop.clear()
             self._task = asyncio.create_task(self._loop())

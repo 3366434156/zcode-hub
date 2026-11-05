@@ -103,7 +103,8 @@ class TestMonitoringRecording:
             res = await client.get("/admin/api/monitoring", headers=ADMIN_AUTH)
         e = res.json()["entries"][0]
         assert e["ok"] is False and e["status"] == 503
-        assert "无可用账号" in e["error"]
+        # 503 文案已从笼统的「无可用账号」改为具体原因（空池 = 没有启用的账号）
+        assert "没有启用的账号" in e["error"] or "无可用账号" in e["error"]
 
     async def test_upstream_4xx_recorded(self, gateway_client, fresh_app):
         client, mock = gateway_client

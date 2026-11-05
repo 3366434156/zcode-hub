@@ -368,7 +368,8 @@ async def messages(request: Request):
     try:
         result = await _dispatch(req_id, body, incoming_headers, port, provider,
                                  affinity.key_of(body),
-                                 no_fallback=_fallback_disabled(request.headers))
+                                 no_fallback=_fallback_disabled(request.headers),
+                                 pin=_pinned_prefer(provider, request.headers))
     except asyncio.CancelledError:
         # 客户端在调度期间断开（429 重试/验证码等待可达数分钟）——CancelError
         # 是 BaseException，不兜底会让监控条目永久滞留「进行中」
@@ -382,9 +383,16 @@ async def messages(request: Request):
             status_code=500,
         )
     if isinstance(result, _Upstream):
+        # 流式重试上下文：只在尚未向客户端出字时重开上游，工厂重走完整调度
+        session = _StreamSession(
+            lambda: _dispatch(req_id, body, incoming_headers, port, provider,
+                              affinity.key_of(body),
+                              no_fallback=_fallback_disabled(request.headers),
+                              pin=_pinned_prefer(provider, request.headers))
+        )
         # dispatch 返回与流式生成器启动之间的取消窗口：兜底关闭释放并发槽位
         try:
-            return result.to_streaming(req_id)
+            return result.to_streaming(req_id, session)
         except asyncio.CancelledError:
             await result.close()
             raise
@@ -420,7 +428,8 @@ async def chat_completions(request: Request):
     try:
         result = await _dispatch(req_id, body, incoming_headers, port, provider,
                                  affinity.key_of(body),
-                                 no_fallback=_fallback_disabled(request.headers))
+                                 no_fallback=_fallback_disabled(request.headers),
+                                 pin=_pinned_prefer(provider, request.headers))
     except asyncio.CancelledError:
         reqlog.finish_error(req_id, "客户端断开", status=499,
                             outcome=reqlog.OUTCOME_CLIENT_ABORTED)
@@ -437,8 +446,14 @@ async def chat_completions(request: Request):
     # 兜底换过模型时这里是**实际服务**的模型（客户端点的是 requested_model）
     model = str(body.get("model") or "")
     if payload.get("stream"):
+        session = _StreamSession(
+            lambda: _dispatch(req_id, body, incoming_headers, port, provider,
+                              affinity.key_of(body),
+                              no_fallback=_fallback_disabled(request.headers),
+                              pin=_pinned_prefer(provider, request.headers))
+        )
         try:
-            return _openai_stream_response(result, model, req_id)
+            return _openai_stream_response(result, model, req_id, session)
         except asyncio.CancelledError:
             await result.close()
             raise
@@ -480,47 +495,70 @@ def _usage_kwargs(usage: dict) -> dict:
     }
 
 
-def _openai_stream_response(up: _Upstream, model: str, req_id: str) -> StreamingResponse:
-    """把上游 Anthropic SSE 事件流转换为 OpenAI chunk 流。"""
+def _openai_stream_response(up: _Upstream, model: str, req_id: str,
+                            session: "_StreamSession | None" = None) -> StreamingResponse:
+    """把上游 Anthropic SSE 事件流转换为 OpenAI chunk 流。
+
+    上游中途断开（incomplete chunked read）且尚未产出任何内容时，经 session
+    透明重开上游；已经输出过内容则不能重放（会重复），发 error chunk 后收口。
+    """
     conv = StreamConverter(model)
+    start_chunk = conv.start()
 
     async def _iter():
+        nonlocal up, conv
+        emitted = False
         try:
-            yield conv.start()
-            async for line in _paced(up.lines()):
-                if line is _KEEPALIVE:
-                    yield line  # 上游静默期的心跳，原样透给客户端
-                    continue
-                if not line.startswith("data:"):
-                    continue
-                data_str = line[5:].strip()
-                if not data_str:
-                    continue
-                evt = _safe_json(data_str)
-                if isinstance(evt, dict):
-                    out = conv.feed(evt)
-                    if out:
-                        reqlog.mark_first(req_id)
-                        reqlog.mark_last(req_id)
-                    for chunk in out:
-                        yield chunk
-            yield conv.done()
-            logs.req_ok(req_id)
-            reqlog.note_usage(req_id, input_tokens=conv.usage.get("prompt_tokens"),
-                              output_tokens=conv.usage.get("completion_tokens"),
-                              cached_tokens=conv.usage.get("cached_tokens"))
-            reqlog.finish_ok(req_id, t_first=up.t_first, status=up.resp.status_code)
-        except asyncio.CancelledError:
-            reqlog.finish_error(req_id, "客户端断开", status=499, t_first=up.t_first,
-                                outcome=reqlog.OUTCOME_CLIENT_ABORTED)
-            raise
-        except Exception as err:  # noqa: BLE001
-            logs.req_err(req_id, f"流传输中断: {err}")
-            reqlog.note_usage(req_id, input_tokens=conv.usage.get("prompt_tokens"),
-                              output_tokens=conv.usage.get("completion_tokens"),
-                              cached_tokens=conv.usage.get("cached_tokens"))
-            reqlog.finish_error(req_id, f"流传输中断: {err}", t_first=up.t_first,
-                                outcome=reqlog.OUTCOME_UPSTREAM_ABORTED)
+            yield start_chunk
+            while True:
+                try:
+                    async for line in _paced(up.lines()):
+                        if line is _KEEPALIVE:
+                            yield line  # 上游静默期的心跳，原样透给客户端
+                            continue
+                        if not line.startswith("data:"):
+                            continue
+                        data_str = line[5:].strip()
+                        if not data_str:
+                            continue
+                        evt = _safe_json(data_str)
+                        if isinstance(evt, dict):
+                            out = conv.feed(evt)
+                            if out:
+                                emitted = True
+                                reqlog.mark_first(req_id)
+                                reqlog.mark_last(req_id)
+                            for chunk in out:
+                                yield chunk
+                    yield conv.done()
+                    logs.req_ok(req_id)
+                    reqlog.note_usage(req_id, input_tokens=conv.usage.get("prompt_tokens"),
+                                      output_tokens=conv.usage.get("completion_tokens"),
+                                      cached_tokens=conv.usage.get("cached_tokens"))
+                    reqlog.finish_ok(req_id, t_first=up.t_first, status=up.resp.status_code)
+                    return
+                except asyncio.CancelledError:
+                    reqlog.finish_error(req_id, "客户端断开", status=499, t_first=up.t_first,
+                                        outcome=reqlog.OUTCOME_CLIENT_ABORTED)
+                    raise
+                except Exception as err:  # noqa: BLE001
+                    if not emitted and session is not None:
+                        replacement = await session.reopen(up, str(err))
+                        if replacement is not None:
+                            # 沿用同一个 chunk_id/created：客户端视角仍是同一条回复
+                            old_id, old_created = conv.chunk_id, conv.created
+                            conv = StreamConverter(model)
+                            conv.chunk_id, conv.created = old_id, old_created
+                            up = replacement
+                            continue
+                    logs.req_err(req_id, f"流传输中断: {err}")
+                    reqlog.note_usage(req_id, input_tokens=conv.usage.get("prompt_tokens"),
+                                      output_tokens=conv.usage.get("completion_tokens"),
+                                      cached_tokens=conv.usage.get("cached_tokens"))
+                    reqlog.finish_error(req_id, f"流传输中断: {err}", t_first=up.t_first,
+                                        outcome=reqlog.OUTCOME_UPSTREAM_ABORTED)
+                    yield _sse_error_chunk()
+                    return
         finally:
             await up.close()
 
@@ -535,8 +573,33 @@ def _sticky_prefer(provider: str) -> str:
     return store.sticky_account(provider) or ""
 
 
+def _pinned_prefer(provider: str, headers) -> str:
+    """显式指定账号（请求头 x-zcode-account: <账号 id 或 name>）。
+
+    烧额度/排障用：把一条车道钉在指定账号上，上游前缀缓存才能稳定命中。
+    仅在网关密钥鉴权通过后生效；找不到账号时返回 ""，调用方回落到会话粘性 /
+    全局粘号 / 轮询。该头属于 x-zcode-* 族，agent 层不会透传到上游。
+    """
+    try:
+        raw = str(headers.get("x-zcode-account") or "").strip()
+    except Exception:  # noqa: BLE001 - header 容器形态异常时按未指定处理
+        return ""
+    if not raw:
+        return ""
+    # 账号 id 形如「寂川-1f359bea」含中文，HTTP 头只能是 latin-1/ASCII，
+    # 客户端需 percent-encode；纯 ASCII 的 id 原样也能解。
+    from urllib.parse import unquote
+
+    try:
+        raw = unquote(raw)
+    except Exception:  # noqa: BLE001
+        pass
+    acc = store.find(provider, raw)
+    return acc.id if acc is not None else ""
+
+
 async def _dispatch(req_id, body, incoming_headers, port, provider, conv_key: str = "",
-                    no_fallback: bool = False):
+                    no_fallback: bool = False, pin: str = ""):
     """调度：先按模型兜底链逐模型试，每个模型内部再多账号轮询。
 
     返回 _Upstream（成功）或 JSONResponse（错误）。
@@ -563,10 +626,10 @@ async def _dispatch(req_id, body, incoming_headers, port, provider, conv_key: st
     models = [requested] if no_fallback else modelpool.candidates(provider, requested)
     if not models:
         models = [requested]
-    # 选号优先级：会话粘性（这段对话上次谁答的，上游前缀缓存能命中）>
-    # 全局粘号（上次成功服务的是谁，所有流量尽量待在一个号上）> 轮询。
+    # 选号优先级：显式钉号（烧额度车道）> 会话粘性（这段对话上次谁答的，
+    # 上游前缀缓存能命中）> 全局粘号（上次成功服务的是谁）> 轮询。
     # 粘号候选不可用时 store.select 会自然落到轮询，这里只负责给出"想让谁上"。
-    prefer = affinity.prefer(provider, conv_key) or _sticky_prefer(provider)
+    prefer = pin or affinity.prefer(provider, conv_key) or _sticky_prefer(provider)
     # 换号原因的出口：最后一个账号为什么不可用（模型额度用尽等），503 时如实回给客户端
     reason: list[str] = [""]
     dead_models: list[str] = []
@@ -655,6 +718,71 @@ async def _wait_slot_turn(timeout: float) -> bool:
             fut.cancel()
 
 
+def _pool_unavailable_reason(provider: str) -> str:
+    """池子里一个可轮询账号都没有时，给出**具体原因**（而不是笼统的 503 文案）。
+
+    典型场景（2026-11-02 23:44 实测）：上游整片回 502/503，所有账号被 5xx
+    保护冻进 cooling——后台额度都正常，客户端却只收到「无可用账号/额度均已
+    耗尽/并发已满」，极易误判成账号或额度坏了。
+    """
+    accounts = [a for a in store.list_accounts(provider) if a.enabled]
+    if not accounts:
+        return "没有启用的账号"
+    now = time.time()
+    cooling = [a for a in accounts if a.is_cooling(now)]
+    if len(cooling) == len(accounts):
+        left = max(0, min(float(a.cooling_until or 0) for a in cooling) - now)
+        return f"所有账号冷却中（上游 5xx 保护），约 {int(left)}s 后自动恢复"
+    if all(a.status == Status.EXHAUSTED for a in accounts):
+        return "所有账号额度已耗尽（等待额度重置或领取赠送）"
+    if all(a.status in (Status.INVALID, Status.DISABLED) for a in accounts):
+        return "所有账号凭证失效或已停用，请在后台重新授权"
+    bad = [a.name for a in accounts
+           if a.status in (Status.INVALID, Status.DISABLED, Status.EXHAUSTED)
+           or a.is_cooling(now)]
+    if bad:
+        head = "、".join(bad[:5]) + (f" 等 {len(bad)} 个账号" if len(bad) > 5 else "")
+        return f"{head}不可用"
+    return "无可用账号（检查后台账号状态/启用开关）"
+
+
+_last_pool_probe = 0.0
+
+
+def _pool_probe_account(provider: str) -> Account | None:
+    """全池 5xx 冷却时的半开探测：每 COOLING_PROBE_INTERVAL 秒放一个请求试探。
+
+    只对「所有启用账号都因上游 5xx 在冷却」生效——风控/人工冷却绝不绕过。
+    探测前先放开这个号的冷却（半开）：成功由 _try_account 正常洗成 active；
+    失败会重新冷却，下一次探测再等一个间隔。这样上游恢复后最多 ~30s 解冻，
+    而不是硬等满 COOLING_SECONDS。
+    """
+    global _last_pool_probe
+    now = time.time()
+    interval = max(1, int(getattr(settings, "COOLING_PROBE_INTERVAL", 30)))
+    if now - _last_pool_probe < interval:
+        return None
+    enabled = [a for a in store.list_accounts(provider) if a.enabled]
+    cooling = [a for a in enabled if a.is_cooling(now)]
+    if not enabled or len(cooling) != len(enabled):
+        return None
+    # last_error 由 5xx 分支写成「上游 HTTP 502/503 ... 冷却」；风控/连接失败的
+    # 冷却不得用探测绕过
+    five_xx = [a for a in cooling if "上游 HTTP 5" in (a.last_error or "")]
+    if len(five_xx) != len(cooling):
+        return None
+    _last_pool_probe = now
+    probe = min(five_xx, key=lambda a: a.cooling_until or 0)
+    probe.cooling_until = None
+    if probe.status == Status.COOLING:
+        probe.status = Status.ACTIVE
+    probe.last_error = None
+    store.update_account(probe)
+    logs.warn("gateway", f"全池因上游 5xx 冷却，半开探测账号 {probe.name}"
+                         f"（每 {interval}s 一次）")
+    return probe
+
+
 async def _dispatch_model(req_id, body, incoming_headers, port, provider, prefer, conv_key,
                           reason: list[str]):
     """单个模型内的多账号轮询。
@@ -697,7 +825,10 @@ async def _dispatch_model(req_id, body, incoming_headers, port, provider, prefer
         while attempts < MAX_ACCOUNT_ATTEMPTS:
             account = store.select(provider, skip_ids=tried, prefer=prefer)
             if account is None:
-                break
+                # 全池 5xx 冷却：半开探测（每 COOLING_PROBE_INTERVAL 秒最多一个）
+                account = _pool_probe_account(provider) if attempts == 0 else None
+                if account is None:
+                    break
             tried.add(account.id)
             if limit > 0 and _inflight.get(account.id, 0) >= limit:
                 # 粘号在忙：**等它**而不是跳到别的号去。用户要的就是「正常情况下
@@ -845,6 +976,10 @@ async def _dispatch_model(req_id, body, incoming_headers, port, provider, prefer
         # 「没问到」，不足以断言模型全池不可用，贸然判死会把流量赶去更弱的模型。
         if model_hits and model_hits == attempts and attempts >= pool_size and not skipped_busy:
             return _MODEL_DEAD
+        # 一个号都没问到（全在冷却/耗尽/失效）：把池子的真实状态写进 reason，
+        # 503 回给客户端时就能直接说清「是上游 5xx 冷却，不是账号没了」
+        if attempts == 0 and not reason[0]:
+            reason[0] = _pool_unavailable_reason(provider)
         break
     return None
 
@@ -978,6 +1113,59 @@ async def _paced(source, idle: float | None = None, stall: float | None = None):
         task.cancel()
 
 
+def _sse_error_frame() -> str:
+    """上游中断的显式 SSE error 帧（Anthropic /v1/messages 协议）。
+
+    流已经被上游掐断时，直接把 HTTP 流截断会让部分客户端把半截回复当成
+    完整结果；补一条标准 error 事件，客户端能明确「这次回答不完整」并重试。
+    """
+    payload = {"type": "error", "error": {
+        "type": "api_error", "message": "上游连接中断，输出被截断，请重试"}}
+    return "event: error\ndata: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
+
+
+def _sse_error_chunk() -> str:
+    """OpenAI chat.completion.chunk 形态的错误帧。"""
+    payload = {"error": {"message": "上游连接中断，输出被截断，请重试",
+                         "type": "api_error"}}
+    return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
+
+
+class _StreamSession:
+    """流式请求的重试上下文：只在**尚未向客户端输出任何内容**时重开上游。
+
+    2026-11-02 实证：上游偶发在 SSE 中途断开（httpx `incomplete chunked read`）。
+    已经流出去的内容不能重放（会重复输出），所以只处理「一个字都没发」的情况：
+    关闭旧连接 → 重新走 _dispatch（换号/换连接/重新过验证码）→ 消费方继续。
+    重试次数由 settings.STREAM_RETRY_TIMES 控制；耗尽后按上游中断如实收口。
+    """
+
+    def __init__(self, factory) -> None:
+        self._factory = factory
+        self._left = max(0, int(getattr(settings, "STREAM_RETRY_TIMES", 2)))
+        self.attempts = 0
+
+    async def reopen(self, failed: "_Upstream", reason: str) -> "_Upstream | None":
+        try:
+            await failed.close()   # 先释放旧连接的并发槽位，再抢新槽位
+        except Exception as err:  # noqa: BLE001 - 关闭半死连接失败不阻断重试
+            logs.warn("gateway", f"关闭中断的上游流失败: {err}")
+        if self._left <= 0:
+            return None
+        self._left -= 1
+        self.attempts += 1
+        logs.warn("gateway", f"上游流未出字即中断（{str(reason)[:100]}），"
+                             f"重新调度（第 {self.attempts} 次）")
+        try:
+            up = await self._factory()
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001 - 重试调度失败按中断收口
+            logs.warn("gateway", f"流重试调度失败: {err}")
+            return None
+        return up if isinstance(up, _Upstream) else None
+
+
 class _Upstream:
     """已建立的上游成功流：由调用方消费并负责关闭。
 
@@ -1042,42 +1230,61 @@ class _Upstream:
             except Exception:  # noqa: BLE001 - 槽位释放失败不掩盖主流程
                 pass
 
-    def to_streaming(self, req_id: str) -> StreamingResponse:
+    def to_streaming(self, req_id: str,
+                     session: "_StreamSession | None" = None) -> StreamingResponse:
         """原样透传（/v1/messages 直通路径）。
 
         透传不解析 body，于是 token 用量只能靠旁路嗅探：`UsageSniffer` 把流过的
         字节攒起来（上限 1 MB），结束时解析出 usage 落台账——否则这类请求在
         「请求监控」里的输入/输出永远是空（旧实现在这里直接丢掉了用量）。
+
+        上游中途断开时：尚未向客户端发出任何字节 → 经 session 重开上游；
+        已经发出过字节 → 不能重放（会重复 message_start/正文），补 error 帧收口。
         """
         up = self
         sniffer = UsageSniffer()
 
         async def _body_iter():
-            first = True
+            nonlocal up, sniffer
+            emitted = False
             try:
-                async for chunk in _paced(up.chunks()):
-                    if chunk is _KEEPALIVE:
-                        yield chunk  # 静默期心跳：不算内容，不影响首字计时
-                        continue
-                    sniffer.feed(chunk if isinstance(chunk, bytes) else chunk.encode("utf-8"))
-                    if first:
-                        first = False
-                        reqlog.mark_first(req_id)
-                    reqlog.mark_last(req_id)
-                    yield chunk
-                reqlog.note_usage(req_id, **_usage_kwargs(sniffer.result()))
-                logs.req_ok(req_id)
-                reqlog.finish_ok(req_id, t_first=up.t_first, status=up.resp.status_code)
-            except asyncio.CancelledError:
-                reqlog.note_usage(req_id, **_usage_kwargs(sniffer.result()))
-                reqlog.finish_error(req_id, "客户端断开", status=499, t_first=up.t_first,
-                                    outcome=reqlog.OUTCOME_CLIENT_ABORTED)
-                raise
-            except Exception as err:  # noqa: BLE001
-                logs.req_err(req_id, f"流传输中断: {err}")
-                reqlog.note_usage(req_id, **_usage_kwargs(sniffer.result()))
-                reqlog.finish_error(req_id, f"流传输中断: {err}", t_first=up.t_first,
-                                    outcome=reqlog.OUTCOME_UPSTREAM_ABORTED)
+                while True:
+                    try:
+                        async for chunk in _paced(up.chunks()):
+                            if chunk is _KEEPALIVE:
+                                yield chunk  # 静默期心跳：不算内容，不影响首字计时
+                                continue
+                            sniffer.feed(chunk if isinstance(chunk, bytes)
+                                         else chunk.encode("utf-8"))
+                            if not emitted:
+                                emitted = True
+                                reqlog.mark_first(req_id)
+                            reqlog.mark_last(req_id)
+                            yield chunk
+                        reqlog.note_usage(req_id, **_usage_kwargs(sniffer.result()))
+                        logs.req_ok(req_id)
+                        reqlog.finish_ok(req_id, t_first=up.t_first,
+                                         status=up.resp.status_code)
+                        return
+                    except asyncio.CancelledError:
+                        reqlog.note_usage(req_id, **_usage_kwargs(sniffer.result()))
+                        reqlog.finish_error(req_id, "客户端断开", status=499,
+                                            t_first=up.t_first,
+                                            outcome=reqlog.OUTCOME_CLIENT_ABORTED)
+                        raise
+                    except Exception as err:  # noqa: BLE001
+                        if not emitted and session is not None:
+                            replacement = await session.reopen(up, str(err))
+                            if replacement is not None:
+                                up = replacement
+                                sniffer = UsageSniffer()  # 旧流没有可用 usage
+                                continue
+                        logs.req_err(req_id, f"流传输中断: {err}")
+                        reqlog.note_usage(req_id, **_usage_kwargs(sniffer.result()))
+                        reqlog.finish_error(req_id, f"流传输中断: {err}", t_first=up.t_first,
+                                            outcome=reqlog.OUTCOME_UPSTREAM_ABORTED)
+                        yield _sse_error_frame()
+                        return
             finally:
                 await up.close()
 

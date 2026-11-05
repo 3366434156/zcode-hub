@@ -36,6 +36,7 @@ ignore = ["E501"]
 [tool.ruff.lint.per-file-ignores]
 # B008: FastAPI Body()/Depends() 惯用法；B023: _body_iter 定义后立即 return，闭包捕获安全
 "app/routes/admin_api.py" = ["B008"]
+"app/routes/admin_burner.py" = ["B008"]
 "app/routes/admin_tunnel.py" = ["B008"]
 "app/routes/gateway.py" = ["B023"]
 

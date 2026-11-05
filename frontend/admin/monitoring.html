@@ -301,12 +301,11 @@ async function refresh(reset){
     state.live = (live.entries || []);
     {const nIn=live.inflight||0;
      const b=document.getElementById('inflight-badge');
-     if(b){b.style.display=nIn>0?'inline-block':'none';
+     if(b){b.style.display=nIn>0?'inline-flex':'none';
            document.getElementById('inflight-n').textContent=nIn;}}
     $('live-cnt').textContent = state.live.filter(e=>e.ok===null).length;
     renderKpis(); renderChannels(); renderSeries(); renderHeatmap(); renderTable(); renderRecent();
     renderFbDetail();
-    {const nIn=(state.live?0:0, (typeof _lastInflight!=='undefined')?_lastInflight:0);}
     $('live-dot').textContent = '实时监控中 · ' + new Date().toLocaleTimeString('zh-CN',{hour12:false});
   }catch(e){ showToast('加载失败: '+e.message, 'error'); }
 }

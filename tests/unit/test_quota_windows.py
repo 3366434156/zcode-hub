@@ -180,3 +180,51 @@ class TestFetchQuotaDropsExpired:
         await quota.fetch_quota(account)
         assert account.status == Status.EXHAUSTED
         assert account.last_error == "额度已用完"
+
+
+class TestBalancePlans:
+    """billing/balance 的 data.plans[]：领取成功但 current 为空时的唯一证据。
+
+    2026-11-02 实证：领取 zcode-v3-start-plan-1102 后 billing/current 只剩
+    `{"code":0}`，balance 才带 active 套餐与 effective_at=23:00 的待生效赠送。
+    只读 current 会让后台显示「无套餐数据」，账号也一直停在 exhausted。
+    """
+
+    def test_merge_prefers_balance_fields_keeps_current_extras(self):
+        current = [{"plan_id": "p1", "show_name": "Start Plan", "status": "active"}]
+        balance = [{"plan_id": "p1", "name": "ZCODE GLOBAL BUILD",
+                    "status": "active", "starts_at": 100, "ends_at": 200,
+                    "entitlements": [{"show_name": "GLM-5.3-Flash",
+                                      "grant_units": 300_000_000,
+                                      "period": "one_time", "effective_at": 150}]}]
+        merged = quota._merge_user_plans(current, balance)
+        assert len(merged) == 1
+        assert merged[0]["show_name"] == "Start Plan", "current 独有字段不能丢"
+        assert merged[0]["name"] == "ZCODE GLOBAL BUILD", "balance 同名字段更权威"
+        assert merged[0]["entitlements"][0]["effective_at"] == 150
+
+    async def test_balance_only_plans_land_in_account(self, monkeypatch, account, fake_store):
+        now = time.time()
+        balance = _Resp(200, {"code": 0, "data": {
+            "balances": [],
+            "plans": [{
+                "user_plan_id": "upl_1", "plan_id": "zcode-v3-start-plan-1102",
+                "name": "ZCODE GLOBAL BUILD", "status": "active",
+                "starts_at": now - 60, "ends_at": now + 86400,
+                "entitlements": [{
+                    "show_name": "GLM-5.3-Flash", "meter": "model_usage",
+                    "unit_type": "token", "grant_units": 300_000_000,
+                    "period": "one_time", "effective_at": now + 3600,
+                }],
+            }],
+        }})
+        _use(monkeypatch, {
+            # 领取后 current 实测只剩 {"code":0}（无 data）
+            "/billing/current": _Resp(200, {"code": 0}),
+            "/billing/balance": balance,
+        })
+        await quota.fetch_quota(account)
+        assert [p["plan_id"] for p in account.plans] == ["zcode-v3-start-plan-1102"]
+        assert account.plan["entitlements"][0]["grant_units"] == 300_000_000
+        # 赠送尚未生效（effective_at 未来）：不能据此判可用，账号状态保持原样
+        assert account.status == Status.ACTIVE

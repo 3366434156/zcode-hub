@@ -567,20 +567,21 @@ select.input option{background:var(--panel);color:var(--ink)}
   .stat-cell:hover .stat-icon{transform:none}
 }
 
-/* ── 设置页：宽屏两列铺开（自适应） ──────────────────────────────────────
+/* ── 设置页：宽屏瀑布流（masonry） ──────────────────────────────────────
    卡片本身封顶 640px（单列读起来舒服），但 1280px 的容器里只剩一条窄栏，
-   右半边全空（用户实测 2560 宽屏尤其明显）。≥1180px 起按两列流式铺开：
-   普通卡各占一列，client-list / 宽卡横跨整行；窄屏保持原来的单列。 */
+   右半边全空（用户实测 2560 宽屏尤其明显）。≥1180px 起普通卡进 .settings-flow
+   做两列 CSS 多栏瀑布流：column-count + break-inside:avoid（整卡不拆、
+   各列独立向下堆叠），矮卡下面直接堆下一张卡，不再被行高对齐拉出大块空白。
+   page-hd / client-list / 宽卡（模型兜底）留在瀑布流外整行铺开；
+   窄屏（<1180px）不启用多栏，保持原来的单列。 */
 @media (min-width:1180px){
   /* 容器本身也放宽：2560 这类宽屏上 1280 的居中窄栏会留下大片空白，
      这里按视口自适应（最多 1600），两列各取一半 */
-  .settings-main{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
-    gap:0 18px;align-items:start;max-width:min(calc(100% - 56px),1600px)}
-  .settings-main > .page-hd,
-  .settings-main > #client-list,
-  .settings-main > .settings-card-wide{grid-column:1/-1}
-  .settings-main > .settings-card{max-width:none}
-  .settings-main > #client-list{display:grid;gap:0 18px;
-    grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}
-  .settings-main > #client-list > .settings-card{max-width:none}
+  .settings-main{max-width:min(calc(100% - 56px),1600px)}
+  .settings-flow{columns:2;column-gap:18px}
+  .settings-flow > .settings-card{max-width:none;break-inside:avoid}
+  /* client-list 内部保持自己的两列 */
+  #client-list{display:grid;gap:0 18px;grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}
+  #client-list > .settings-card{max-width:none}
+  .settings-card-wide{max-width:none}
 }

@@ -67,20 +67,41 @@ def client_configs_query() -> str:
     return f"app_version={CLIENT_APP_VERSION}"
 
 
+def _version_key(version: str) -> tuple[int, ...]:
+    try:
+        return tuple(int(part) for part in version.strip().split("."))
+    except (AttributeError, ValueError):
+        return (0,)
+
+
 def set_client_version(version: str) -> None:
-    """运行期把客户端版本改到官方最新发行版（version_sync 专用）。
+    """运行期把 messages 客户端版本改到官方最新发行版（version_sync 显式跟进）。
 
     版本在本模块内多处派生（UA/验证码头/configs 查询串），只允许经此函数改写，
-    保证「官方升版改一处」的口径在运行期同样成立。
+    保证「官方升版改一处」的口径在运行期同样成立。billing 族用独立的
+    BILLING_APP_VERSION（默认官方桌面现行版），见 set_billing_version。
     """
     global CLIENT_APP_VERSION, BILLING_APP_VERSION, USER_AGENT, X_ZCODE_APP_VERSION
     v = (version or "").strip()
     if not v:
         return
     CLIENT_APP_VERSION = v
-    BILLING_APP_VERSION = v
     USER_AGENT = f"ZCode/{v}"
     X_ZCODE_APP_VERSION = v
+    if _version_key(v) > _version_key(BILLING_APP_VERSION):
+        BILLING_APP_VERSION = v
+
+
+def set_billing_version(version: str) -> None:
+    """只改 billing 族版本（活动套餐按客户端版本门槛投放），只升不降。
+
+    messages 的钉版（CLIENT_APP_VERSION）保持不动：3.17.x 的 messages 形状会
+    3012；billing 必须跟官方桌面现行版，否则 preview 恒空、claim 1004。
+    """
+    global BILLING_APP_VERSION
+    v = (version or "").strip()
+    if v and _version_key(v) > _version_key(BILLING_APP_VERSION):
+        BILLING_APP_VERSION = v
 
 
 # ── 官方发行清单（客户端版本巡检的权威来源）──────────────────────────────────
@@ -101,11 +122,13 @@ MARKETING_TOUCH_URL = f"{ZCODE_ORIGIN}{MARKETING_TOUCH_PATH}"
 MARKETING_CLAIM_ACTION = "claim_zcode_plan"
 
 # ── billing 族版本 / 激活上报（zcode-switch v1.5.4 实证，2026-09-06 移植）─────
-# billing 族（preview/claim/balance/current/usage/configs/event）用官方桌面端
-# 现行版。2026-10-26 起与 CLIENT_APP_VERSION 同源：两者都只是「客户端版本」，
-# 分开维护只会漂移（曾出现 messages 3.16.3 / billing 3.14.4，活动套餐因此
-# 对 billing 端不可见），故直接引用同一常量，升版改一处即可。
-BILLING_APP_VERSION = CLIENT_APP_VERSION
+# billing 族（preview/claim/balance/current/usage/configs/event）必须跟**官方桌面端
+# 现行版**：活动套餐按客户端版本门槛投放。2026-11-03 23:20 实证（同账号、同设备）：
+#   billing 3.16.3 → preview 空、claim 返回 1004 no permission
+#   billing 3.17.1 / 3.17.2 → preview 立刻出现 zcode-v3-start-plan-1103
+# messages 仍钉 3.16.3（3.17.x 的 messages 形状会 3012），两个版本必须分开，
+# 不能再引用同一个常量。version_sync 会把 billing 版本跟到官方清单最新版。
+BILLING_APP_VERSION = "3.17.2"
 BILLING_TITLE = "Z Code@electron"        # zcode-switch billing 头实证形态
 BILLING_RELEASE_CHANNEL = "stable"
 # 官方客户端每日活跃事件：POST /api/v1/event/report（不在 zcode-plan 下、无

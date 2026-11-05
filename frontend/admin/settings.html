@@ -47,6 +47,16 @@
     }
     /* 超窄屏：`标签 + 地址` 排一行时，64px 的标签把地址挤得放不下。
        改成标签单独一行，地址整宽（长 URL 也能整段换行）。 */
+    /* 宽屏双栏时，客户端接入卡横跨两栏（内容最长、操作最常用） */
+    @media (min-width:1180px){ #paste-card{column-span:all} }
+    #paste-card .cone-details{margin-top:10px}
+    #paste-card .cone-details > summary{cursor:pointer;user-select:none}
+    #paste-card .cone-details[open] > summary{margin-bottom:4px}
+    /* 客户端接入卡里的「一键接入」子卡：扁平化，避免卡中卡 */
+    #paste-card .settings-card{max-width:none;margin:0;padding:14px 0 0;border:0;
+      border-top:1px solid var(--hairline-soft);border-radius:0;background:transparent;box-shadow:none}
+    #paste-card .settings-card:hover{box-shadow:none;border-color:transparent;border-top-color:var(--hairline-soft)}
+    #paste-card .settings-card:first-child{padding-top:0;border-top:0}
     @media (max-width:400px){
       .cone-meta > div{display:grid;gap:2px;min-width:0}
       .cone-meta .cone-k{min-width:0;font-size:11.5px}
@@ -65,55 +75,70 @@
     </div>
   </div>
 
-  <div class="settings-card" id="paste-card">
-    <div class="section-title" style="margin-bottom:6px">客户端接入 · 别的电脑上「粘三样」就能用</div>
-    <div class="hint" style="margin-bottom:10px">任何 OpenAI / Anthropic 兼容客户端都只用这三样：
-      不用装 magpie、不用改脚本、不用同步。把下面几行分别粘到客户端的「Base URL / API Key / 模型」里即可。</div>
+  <div class="settings-flow">
+
+  <div class="settings-card settings-card-wide" id="paste-card">
+    <div class="section-title" style="margin-bottom:6px">客户端接入</div>
+    <div class="hint" style="margin-bottom:10px">任何 OpenAI / Anthropic 兼容客户端都只用这三样：把下面几行分别粘到客户端的「Base URL / API Key / 模型」里——不用装插件、不用改脚本。</div>
     <div class="cone-meta" id="paste-rows"><div class="hint">加载中…</div></div>
     <div class="hint" id="deploy-status" style="margin-top:12px">加载中…</div>
+    <div id="client-list" style="margin-top:16px"></div>
+    <details style="margin-top:12px">
+      <summary class="hint" style="cursor:pointer">一键接入做了什么</summary>
+      <div class="hint" style="line-height:1.9;margin-top:6px">
+        · 只往客户端配置里写一条 provider（id 固定 <code>zcode2api</code>），其它 provider / routing group / 自定义字段原样保留；写前自动备份原件，可随时一键还原。<br>
+        · 客户端不在本机时，用上面的「粘三样」，或在对端执行
+        <code>python -m app.clients apply --client magpie --base-url &lt;网关地址&gt; --key &lt;网关 Key&gt;</code>。
+      </div>
+    </details>
   </div>
 
-  <div class="settings-card" id="gateway-card">
-    <div class="section-title" style="margin-bottom:12px">本网关</div>
-    <div class="cone-meta" id="gateway-meta"><div class="hint">加载中…</div></div>
-  </div>
-
-  <div class="settings-card" id="tunnel-card">
-    <div class="section-title" style="margin-bottom:6px">公网访问 · 其它网络也能用</div>
-    <div class="hint" style="margin-bottom:12px">走 Cloudflare 隧道，不用公网 IP、不用在路由器上开端口；
-      手机流量、公司电脑、朋友家都能直接调本网关。</div>
-    <div id="tunnel-body"><div class="hint">加载中…</div></div>
-  </div>
-
-  <div class="settings-card" id="supervisor-card">
-    <div class="section-title" style="margin-bottom:6px">续派监督 · 着色器项目自动续派开关</div>
-    <div class="hint" style="margin-bottom:12px">控制 ZCode 停止回合后是否自动续派着色器任务。总闸对应
-      <code>_sup\continue.enabled</code>；「一次性指令」写入 <code>next-prompt.txt</code>，
-      执行一次后自动归档，不会重复注入；循环模式（烧额度）必须显式打开且需配指令文件。</div>
-    <div id="supervisor-body"><div class="hint">加载中…</div></div>
-  </div>
-
-  <div class="settings-card" id="remote-card">
-    <div class="section-title" style="margin-bottom:8px">其他电脑（局域网）</div>
-    <div class="hint" style="margin-bottom:12px">让别的电脑用上这台机器的额度：选一种方式，把对端要跑的那行命令复制过去执行即可。</div>
+  <div class="settings-card settings-card-wide" id="remote-card">
+    <div class="section-title" style="margin-bottom:8px">其他电脑（局域网 / GitHub 同步）</div>
+    <div class="hint" style="margin-bottom:12px">让别的电脑用上这台机器的额度：选一种方式，把对端要跑的那行命令复制过去执行即可。
+      首次连入需放行防火墙（仓库里双击 <code>allow-firewall.bat</code>）。</div>
     <div id="remote-body"><div class="hint">加载中…</div></div>
   </div>
 
-  <div id="client-list"></div>
+  <div class="settings-card" id="tunnel-card">
+    <div class="section-title" style="margin-bottom:6px">公网访问</div>
+    <div class="hint" style="margin-bottom:12px">走 Cloudflare 隧道，不用公网 IP、不用在路由器上开端口；手机流量、公司电脑、朋友家都能直接调本网关。</div>
+    <div id="tunnel-body"><div class="hint">加载中…</div></div>
+  </div>
 
-  <div class="settings-card">
-    <div class="section-title" style="margin-bottom:12px">一键接入做了什么</div>
-    <div class="hint" style="line-height:1.9">
-      · 只往客户端配置里写一条 provider（id 固定为 <code>zcode2api</code>），其它 provider、routing group、自定义字段原样保留。<br>
-      · 写入前自动备份原件（首次接入前的版本永久保留），文件以 0600 落盘，采用临时文件 + 原子替换。<br>
-      · 「一键还原」回到首次接入前的字节；若期间你或客户端自己改过该文件，则只摘掉本网关那一条，不覆盖你的改动。<br>
-      · 客户端不在本机（例如 magpie 跑在另一台电脑）时，可改用命令行：
-      <code>python -m app.clients apply --client magpie --base-url &lt;网关地址&gt; --key &lt;网关 Key&gt;</code>
+  <div class="settings-card" id="runtime-card">
+    <div class="section-title" style="margin-bottom:12px">运行参数</div>
+    <div class="hint" style="margin-bottom:10px">修改后点保存即时生效；0 的语义见每项说明。</div>
+    <div class="settings-row">
+      <label>额度刷新间隔（秒）</label>
+      <div class="hint">后台自动刷新各账号额度与状态的周期（默认 1800 秒 = 30 分钟；billing 查询本身是上游风控信号源，别调太小）。设为 0 关闭自动刷新（仍可手动刷新）。</div>
+      <input class="input" id="quota-interval" type="number" min="0" step="5" placeholder="1800">
+    </div>
+    <div class="settings-row">
+      <label>单账号并发上限</label>
+      <div class="hint">每个账号同时处理的最大请求数；某账号并发满时自动切下一个账号，所有账号都满时请求排队等空位（默认最多等 120s，可用环境变量 ZCODE_QUEUE_WAIT_MAX 调整，0 = 不排队直接拒绝）。默认为 1（上游对「账号 × 模型」并发硬限很低，超了会回 429 code 3009）。设为 0 不限制。</div>
+      <input class="input" id="account-concurrency" type="number" min="0" step="1" placeholder="1">
+    </div>
+    <div class="settings-row">
+      <label>全局粘号</label>
+      <div class="hint">所有会话的流量都尽量留在同一个账号上，只有它不可用（额度用完 / 冷却 / 并发满 / 凭证失效）才轮询下一个——上游按「账号 × 模型」计并发租约，摊开到多个号并不能提高并发上限。会话粘性优先级更高：同一段对话先回它上次用的号。默认开启。</div>
+      <label style="display:inline-flex;align-items:center;gap:8px;font-weight:500;font-size:13px">
+        <input type="checkbox" class="cb" id="account-sticky" checked>
+        正常情况下固定用一个账号
+      </label>
+    </div>
+    <div class="settings-row">
+      <label>套餐自动领取轮（秒）</label>
+      <div class="hint">周期对全部 JWT 账号执行活动套餐领取（激活上报 + 查询 + 领取）。设为 0 关闭轮次，仅入池/手动触发。默认 3600（1 小时）。</div>
+      <input class="input" id="claim-round-interval" type="number" min="0" step="30" placeholder="3600">
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px">
+      <button onclick="saveSettings()" class="dialog-btn dialog-btn-primary">保存</button>
     </div>
   </div>
 
-  <div class="settings-card">
-    <div class="section-title" style="margin-bottom:16px">鉴权</div>
+  <div class="settings-card" id="security-card">
+    <div class="section-title" style="margin-bottom:16px">访问安全</div>
     <div class="settings-row">
       <label>后台密码</label>
       <div class="hint">用于登录此管理后台。修改后需用新密码重新登录。</div>
@@ -125,33 +150,13 @@
       <div class="hint">设置后，调用 <code>/v1/messages</code> 须携带 <code>Authorization: Bearer &lt;key&gt;</code> 或 <code>x-api-key</code>。清空并保存可关闭校验（生产必须配置）。输入框显示掩码，未改动保存不会覆盖原值。</div>
       <input class="input" id="gateway-key" type="password" placeholder="留空表示不启用" autocomplete="new-password">
     </div>
-    <div class="settings-row">
-      <label>额度刷新间隔（秒）</label>
-      <div class="hint">后台自动刷新各账号额度与状态的周期（默认 1800 秒 = 30 分钟；billing 查询本身是上游风控信号源，别调太小）。设为 0 关闭自动刷新（仍可手动刷新）。修改后即时生效。</div>
-      <input class="input" id="quota-interval" type="number" min="0" step="5" placeholder="1800">
-    </div>
-    <div class="settings-row">
-      <label>单账号并发上限</label>
-      <div class="hint">每个账号同时处理的最大请求数；某账号并发满时自动切下一个账号，所有账号都满时请求排队等空位（默认最多等 120s，可用环境变量 ZCODE_QUEUE_WAIT_MAX 调整，0 = 不排队直接拒绝）。默认为 1（上游对「账号 × 模型」并发硬限很低，超了会回 429 code 3009），并发能力因此等于账号数。设为 0 不限制。修改后即时生效。</div>
-      <input class="input" id="account-concurrency" type="number" min="0" step="1" placeholder="1">
-    </div>
-    <div class="settings-row">
-      <label>全局粘号</label>
-      <div class="hint">所有会话的流量都尽量留在同一个账号上，只有它不可用（额度用完 / 冷却 / 并发满 / 凭证失效）才轮询下一个——上游按「账号 × 模型」计并发租约，摊开到多个号并不能提高并发上限，只会让请求监控看起来一直在跳号。会话粘性优先级更高：同一段对话先回它上次用的号。默认开启。</div>
-      <label style="display:inline-flex;align-items:center;gap:8px;font-weight:500;font-size:13px">
-        <input type="checkbox" class="cb" id="account-sticky" checked>
-        正常情况下固定用一个账号
-      </label>
-    </div>
-    <div class="settings-row">
-      <label>套餐自动领取轮（秒）</label>
-      <div class="hint">周期对全部 JWT 账号执行活动套餐领取（激活上报 + 查询 + 领取）。设为 0 关闭轮次，仅入池/手动触发。默认 3600（1 小时）。修改后即时生效。</div>
-      <input class="input" id="claim-round-interval" type="number" min="0" step="30" placeholder="3600">
-    </div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px">
       <button onclick="saveSettings()" class="dialog-btn dialog-btn-primary">保存</button>
     </div>
   </div>
+
+  </div>
+
 
   <div class="settings-card settings-card-wide">
     <div class="section-title" style="margin-bottom:16px">模型兜底（自动换模型）</div>
@@ -190,17 +195,6 @@
     </div>
   </div>
 
-  <div class="settings-card">
-    <div class="section-title" style="margin-bottom:12px">使用说明</div>
-    <div class="hint" style="line-height:1.9">
-      · 在「账号池」粘贴 Coding Plan JWT 或 API Key 即可加入轮询。<br>
-      · 请求按 round-robin 分发；某账号额度用完会自动切到下一个账号。<br>
-      · 账号额度、状态在「账号池」页实时刷新展示。<br>
-      · 对话端点：<code id="endpoint">/v1/messages</code>（兼容 Anthropic Messages 协议）。<br>
-      · 局域网访问：同一网段用 <code id="lan-url">http://&lt;本机IP&gt;:3000/admin</code> 打开本后台
-      （首次需放行防火墙：仓库里双击 <code>allow-firewall.bat</code>）。
-    </div>
-  </div>
 </main>
 
 <script src="/static/js/auth.js?v={{APP_VERSION}}"></script>
@@ -211,13 +205,9 @@
   await renderAdminHeader();
   const key=await adminKey.get();
   if(!key||!await verifyKey(ADMIN_API+'/verify',key).catch(()=>false))return location.href='/admin/login';
-  document.getElementById('endpoint').textContent=location.origin+'/v1/messages';
-  const lan=document.getElementById('lan-url');
-  if(lan)lan.textContent=location.origin+'/admin';
   load();
   loadAgents();   // 客户端接入并入本页后，两块数据各自加载互不阻塞
   loadTunnel();   // 公网隧道状态：地址由云端分配，单独一次请求
-  loadSupervisor();  // 续派监督开关状态
 })();
 
 /* 同时转义引号：模型状态表的判死原因来自上游错误原文，会进 title/data-* 属性，
@@ -238,7 +228,6 @@ async function loadAgents(){
   try{
     state=await api('GET','/agents');
     renderPaste();
-    renderGateway();
     renderRemote();
     renderClients();
     renderDeployStatus();
@@ -375,69 +364,10 @@ async function copyText(id){
   else showToast('复制失败，请手动选中复制','error');
 }
 
-function renderGateway(){
-  const g=state.gateway||{};
-  const models=(state.models||[]).map(m=>`<span class="badge badge-jwt">${esc(m)}</span>`).join(' ');
-  document.getElementById('gateway-meta').innerHTML=`
-    <div><span class="cone-k">Anthropic</span><code>${esc(g.base_url)}</code></div>
-    <div><span class="cone-k">OpenAI</span><code>${esc(g.base_url_v1)}</code></div>
-    <div><span class="cone-k">网关 Key</span>${g.key_set?badge('已启用','ok'):badge('未启用（本地客户端可直接连）','warn')}</div>
-    <div><span class="cone-k">模型</span><span class="cone-models">${models||'—'}</span></div>
-    <div><span class="cone-k">状态目录</span><code>${esc(state.state_dir)}</code></div>
-  `;
-}
-
 /* ── 公网访问（cloudflared 隧道）────────────────────────────────────────
    临时隧道每次启动换一个随机域名，所以地址只以后端状态为准、前端不缓存：
    换了域名页面必须立刻能看出来。 */
 let tunnelState=null;
-async function loadSupervisor(){
-  const box=document.getElementById('supervisor-body');
-  if(!box)return;
-  try{
-    const s=await api('GET','/supervisor');
-    const st=s.lastAt?new Date(s.lastAt).toLocaleString():'—';
-    box.innerHTML=`
-      <div class="hint" style="margin-bottom:10px">
-        总闸：<b style="color:${s.enabled?'var(--green,#3a9)':'var(--red)'}">${s.enabled?'开启（插件可用）':'关闭（全部放行停止）'}</b>
-        ｜循环模式：<b>${s.loop?'开启（烧额度）':'关'}</b>
-        ｜历史续派次数：${s.count}｜上次续派：${st}<br>
-        待发指令：${s.prompt?'<b>有</b>（本回合结束即执行一次）':'无'}
-      </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
-        <button class="btn ${s.enabled?'':'btn-primary'}" onclick="supToggle('enabled',${!s.enabled})">${s.enabled?'关闭总闸':'打开总闸'}</button>
-        <button class="btn ${s.loop?'':'btn-primary'}" onclick="supToggle('loop',${!s.loop})">${s.loop?'关闭循环模式':'开启循环模式（慎用）'}</button>
-        <button class="btn" onclick="supPrompt('')">清空待发指令</button>
-      </div>
-      <textarea id="sup-prompt" class="input" rows="3" style="width:100%"
-        placeholder="写一条一次性续派指令，例如：继续把舞狮批的备份和登记补完，完成后停下">${s.prompt?esc(s.prompt):''}</textarea>
-      <div style="margin-top:8px">
-        <button class="btn btn-primary" onclick="supSend()">下发一次性指令（执行一次即归档）</button>
-      </div>`;
-  }catch(e){
-    box.innerHTML=`<div class="hint">状态加载失败：${esc(e.message)}（后端需重启网关后才有此接口）</div>`;
-  }
-}
-async function supToggle(kind,want){
-  try{
-    await api('POST','/supervisor/'+kind,kind==='enabled'?{enabled:want}:{loop:want});
-    showToast(kind==='enabled'?(want?'总闸已开启':'总闸已关闭'):(want?'循环模式已开启':'循环模式已关闭'),'success');
-    loadSupervisor();
-  }catch(e){showToast('操作失败: '+e.message,'error');}
-}
-async function supPrompt(text){
-  try{
-    await api('POST','/supervisor/prompt',{text});
-    showToast(text?'一次性指令已下发（回合结束即执行一次）':'待发指令已清空','success');
-    loadSupervisor();
-  }catch(e){showToast('操作失败: '+e.message,'error');}
-}
-async function supSend(){
-  const v=(document.getElementById('sup-prompt')||{}).value||'';
-  if(!v.trim()){showToast('先写指令再下发','error');return;}
-  await supPrompt(v.trim());
-}
-
 let tunnelPoll=null;
 
 async function loadTunnel(){
@@ -596,13 +526,16 @@ function renderClients(){
           ${restoreBtn}
         </div>
       </div>
-      <div class="cone-meta">
-        <div><span class="cone-k">写入</span><code>${esc(c.write_target)}</code></div>
-        ${c.config_paths.filter(p=>p!==c.write_target).map(p=>`<div><span class="cone-k">相关</span><code>${esc(p)}</code></div>`).join('')}
-        ${applied}
-      </div>
+      ${applied?`<div class="cone-meta" style="margin-top:10px">${applied}</div>`:''}
       ${warnHtml}
-      ${(c.notes||[]).length?`<ul class="cone-notes">${c.notes.map(n=>`<li>${esc(n)}</li>`).join('')}</ul>`:''}
+      <details class="cone-details">
+        <summary class="hint">写入路径与技术说明</summary>
+        <div class="cone-meta">
+          <div><span class="cone-k">写入</span><code>${esc(c.write_target)}</code></div>
+          ${c.config_paths.filter(p=>p!==c.write_target).map(p=>`<div><span class="cone-k">相关</span><code>${esc(p)}</code></div>`).join('')}
+        </div>
+        ${(c.notes||[]).length?`<ul class="cone-notes">${c.notes.map(n=>`<li>${esc(n)}</li>`).join('')}</ul>`:''}
+      </details>
     </div>`;
   }).join('');
 }

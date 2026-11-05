@@ -15,7 +15,9 @@ rem  console code page, so non-ASCII text breaks the parser.
 rem ===========================================================
 
 echo Stopping other zcode-hub instances ...
-powershell -NoProfile -Command "$p = Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('python.exe','pythonw.exe') -and $_.CommandLine -like '*cli.py*serve*' }; if ($p) { $p | ForEach-Object { Write-Host ('  stopping: PID ' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; Start-Sleep -Seconds 2; if (Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('python.exe','pythonw.exe') -and $_.CommandLine -like '*cli.py*serve*' }) { Write-Host '  [WARN] some zcode-hub processes survived; they may still hold the port.' } else { Write-Host '  all zcode-hub instances stopped.' } } else { Write-Host '  no running zcode-hub instance.' }"
+rem Supervisors are stopped BEFORE gateways: a live supervisor would
+rem otherwise restart its gateway within ~2s and win the port race.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\stop-all.ps1" %*
 
 echo.
 echo Starting zcode-hub ...

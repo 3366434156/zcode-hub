@@ -53,7 +53,7 @@ async def test_round_only_visits_billing_allowed_accounts(monkeypatch):
         _FakeAccount("ok-2", billing=True),
     ]
 
-    async def fake_auto_claim(acc, *, skip_plan_ids=None):
+    async def fake_auto_claim(acc, *, skip_plan_ids=None, force_activation=False):
         visited.append(acc.id)
         return [{"account_id": acc.id, "ok": acc.id == "ok-1"}] if acc.id == "ok-1" else []
 
@@ -79,7 +79,7 @@ async def test_round_swallows_single_account_error(monkeypatch):
     accounts = [_FakeAccount("boom", billing=True), _FakeAccount("fine", billing=True)]
     visited: list[str] = []
 
-    async def fake_auto_claim(acc, *, skip_plan_ids=None):
+    async def fake_auto_claim(acc, *, skip_plan_ids=None, force_activation=False):
         visited.append(acc.id)
         if acc.id == "boom":
             raise RuntimeError("captcha exploded")
@@ -107,7 +107,7 @@ async def test_round_1005_next_at_holds_then_clears_on_success(monkeypatch):
     refreshed: list[str] = []
     quota_full = {"now": True}
 
-    async def fake_auto_claim(acc, *, skip_plan_ids=None):
+    async def fake_auto_claim(acc, *, skip_plan_ids=None, force_activation=False):
         skip = set(skip_plan_ids or set())
         skip_sets.append(skip)
         if "p-quota" in skip:
@@ -153,7 +153,7 @@ async def test_round_1005_without_next_at_no_hold(monkeypatch):
     accounts = [_FakeAccount("a1", billing=True)]
     skip_sets: list[set[str]] = []
 
-    async def fake_auto_claim(acc, *, skip_plan_ids=None):
+    async def fake_auto_claim(acc, *, skip_plan_ids=None, force_activation=False):
         skip_sets.append(set(skip_plan_ids or set()))
         return [{"account_id": acc.id, "account_name": acc.name, "ok": False,
                  "plan_id": "p-x", "message": "今日领取名额已用完", "code": 1005}]
@@ -203,7 +203,7 @@ async def test_round_no_accounts_warns_on_state_change_only(fresh_app, monkeypat
     warns: list[str] = []
     monkeypatch.setattr(claim_module.logs, "warn", lambda tag, msg: warns.append(msg))
 
-    async def fake_round_fn(acc, skip_plan_ids=None):
+    async def fake_round_fn(acc, skip_plan_ids=None, force_activation=False):
         return []
 
     monkeypatch.setattr(claim_module, "auto_claim_all_plans", fake_round_fn)
@@ -377,3 +377,98 @@ async def test_auto_claim_skip_plan_ids_skips_claim_only(monkeypatch):
     assert claimed == ["p-new"], "退避中的套餐不得打 claim"
     assert [o["plan_id"] for o in outcomes] == ["p-new"]
     assert all(o["ok"] for o in outcomes)
+
+
+@pytest.mark.asyncio
+async def test_auto_pick_plan_hints_pending_grant_after_claim(monkeypatch):
+    """preview 空但本地 plans 有待生效赠送：文案说「已领取」，不再误导成失败。
+
+    2026-11-02：领取成功后上游撤下投放，紧接着的重复领取只看到空 preview；
+    balance.data.plans 里 entitlement.effective_at 在当晚 23:00。
+    """
+    import app.claim as claim_module
+    from app.models import Account
+
+    acc = Account.create("zai", "pending", "a.b.c")
+    eff = time.time() + 3600
+    acc.plan = {
+        "plan_id": "zcode-v3-start-plan-1102", "status": "active",
+        "entitlements": [{
+            "show_name": "GLM-5.3-Flash", "meter": "model_usage",
+            "unit_type": "token", "grant_units": 300_000_000,
+            "period": "one_time", "effective_at": eff,
+        }],
+    }
+    acc.plans = [acc.plan]
+
+    async def fake_preview(a):
+        return []
+
+    monkeypatch.setattr(claim_module, "preview_plans", fake_preview)
+    with pytest.raises(claim_module.ClaimError) as err:
+        await claim_module._auto_pick_plan(acc, None)
+    message = str(err.value)
+    assert "已领取" in message
+    assert time.strftime("%H:%M", time.localtime(eff)) in message
+
+    # 没有待生效赠送时保持原文案
+    acc.plans = []
+    acc.plan = {}
+    with pytest.raises(claim_module.ClaimError) as err2:
+        await claim_module._auto_pick_plan(acc, None)
+    assert "暂无可领取的套餐" in str(err2.value)
+
+
+def test_early_window_bounds():
+    """23:00–23:02 才算窗口头；23:03 起不再 60s 追投。"""
+    import app.claim as claim_module
+
+    def ts(hour, minute):
+        return time.mktime((2026, 11, 3, hour, minute, 0, 0, 0, -1))
+
+    assert claim_module._early_window(ts(23, 0))
+    assert claim_module._early_window(ts(23, 2))
+    assert not claim_module._early_window(ts(23, 3))
+    assert not claim_module._early_window(ts(22, 59))
+    assert not claim_module._early_window(ts(0, 0))
+
+
+@pytest.mark.asyncio
+async def test_round_forces_window_activation_once(monkeypatch):
+    """23:00 首轮强制补激活；同一天后续轮次不再强制（避免重复日活上报）。"""
+    accounts = [_FakeAccount("a1", billing=True)]
+    calls: list[bool] = []
+
+    async def fake_auto_claim(acc, *, skip_plan_ids=None, force_activation=False):
+        calls.append(force_activation)
+        return [{"account_id": acc.id, "ok": True}]
+
+    async def fake_refresh(batch):
+        return {"ok": len(batch), "fail": 0}
+
+    import app.claim as claim_module
+
+    monkeypatch.setattr(claim_module, "auto_claim_all_plans", fake_auto_claim)
+    monkeypatch.setattr(claim_module, "_early_window", lambda now=None: True)
+    monkeypatch.setattr("app.quota.refresh_accounts", fake_refresh)
+    monkeypatch.setattr("app.store.store", _fake_store(accounts))
+
+    manager = ClaimRoundManager()
+    await manager._round()
+    await manager._round()
+
+    assert calls == [True, False]
+    assert manager._window_activation_day == claim_module._today_key()
+
+
+def test_next_wait_aligns_and_retries_window():
+    """600s 轮对齐到 :00:10/:10:10；窗口头未领到改 60s 追投。"""
+    import app.claim as claim_module
+
+    def ts(hour, minute, second=0):
+        return time.mktime((2026, 11, 3, hour, minute, second, 0, 0, -1))
+
+    assert claim_module._next_wait(ts(13, 52), 600, 0) == pytest.approx(490)
+    assert claim_module._next_wait(ts(23, 0, 10), 600, 0) == 60
+    assert claim_module._next_wait(ts(23, 3, 10), 600, 0) == pytest.approx(420)
+    assert claim_module._next_wait(ts(23, 0, 10), 600, 1) == pytest.approx(600)

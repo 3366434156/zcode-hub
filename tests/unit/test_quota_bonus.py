@@ -46,3 +46,19 @@ class TestBonusActive:
         assert _bonus_active({"entitlements": []}, _NOW) is False
         assert _bonus_active({"entitlements": [{"period": "one_time"}]}, _NOW) is False
         assert _bonus_active(None, _NOW) is False
+
+    def test_inactive_plan_not_counted(self):
+        """balance/current 残留的旧套餐：status 非 active 一律不算。"""
+        plan = _plan()
+        plan["status"] = "expired"
+        assert _bonus_active(plan, _NOW) is False
+        plan["status"] = "active"
+        assert _bonus_active(plan, _NOW) is True
+
+    def test_plan_window_end_caps_bonus(self):
+        """entitlement 没有 ends_at 时以套餐窗口为准（赠送随套餐到期）。"""
+        plan = _plan()
+        plan["ends_at"] = _NOW - 1
+        assert _bonus_active(plan, _NOW) is False
+        plan["ends_at"] = _NOW + 3600
+        assert _bonus_active(plan, _NOW) is True

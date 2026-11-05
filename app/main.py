@@ -5,16 +5,21 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from . import constants, logs, settings
+from .burner import runner as burner_runner
 from .captcha import captcha_manager
 from .claim import claim_round
 from .quota import monitor
-from .routes import admin_api, admin_logs, admin_tunnel, gateway, pages
+from .reviver import audit_bindings as revive_audit_bindings
+from .reviver import ensure_enabled as revive_ensure_enabled
+from .reviver import runner as revive_runner
+from .routes import admin_api, admin_burner, admin_logs, admin_tunnel, gateway, pages
 from .version_sync import version_sync
 
 # 修正 Windows 中文控制台可能出现的乱码
@@ -149,6 +154,16 @@ async def lifespan(app: FastAPI):
     captcha_manager.start()   # 验证码预解池后台补充
     version_sync.start()      # 客户端版本巡检（官方最新 vs 钉版；跟进需显式开启）
     claim_round.start()       # 套餐自动领取轮（间隔 0 = 关闭）
+    burner_runner.start()     # 任务工单队列（续派页；总闸关闭时只空转）
+    revive_ensure_enabled()   # 会话唤醒器：兜底客户端停止续派/回合异常
+    # 启动审计：绑定到非网关模型的历史会话一律摘除并封锁（2026-11-05 事故）
+    try:
+        audit = revive_audit_bindings()
+        if any(item.get("action") == "blocked" for item in audit.get("results", [])):
+            logs.warn("revive", f"启动通道审计：已封锁 {sum(1 for i in audit['results'] if i.get('action') == 'blocked')} 个炉位")
+    except Exception as err:  # noqa: BLE001 - 审计失败不能拖垮网关启动
+        logs.warn("revive", f"启动通道审计异常: {err}")
+    revive_runner.start()
     _run_install_sequence_on_start()
     from .tunnel import tunnel
 
@@ -165,6 +180,8 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         tunnel.stop(persist=False)
+        revive_runner.stop()
+        burner_runner.stop()
         await monitor.stop()
         await version_sync.stop()
         await claim_round.stop()
@@ -179,11 +196,19 @@ def create_app() -> FastAPI:
 
     app.include_router(pages.router)
     app.include_router(admin_api.router)
+    # 续派工单（zburn 合并进来的队列/派单/验收）
+    app.include_router(admin_burner.router)
     # 网关日志单独一个 router：它的数据源（logstore）与请求台账完全独立，
     # 拆开可以让「日志」随时增删而不碰 admin_api 这个已经很大的文件
     app.include_router(admin_logs.router, prefix="/admin/api")
     app.include_router(admin_tunnel.router)
     app.include_router(gateway.router)
+
+    @app.get("/healthz", include_in_schema=False)
+    def healthz() -> dict:
+        """看门狗探针：无鉴权、不碰上游、不读账号库，只证明进程还能响应。"""
+        return {"ok": True, "version": settings.APP_VERSION, "ts": time.time()}
+
     return app
 
 

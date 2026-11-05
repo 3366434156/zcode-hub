@@ -208,13 +208,40 @@ def _today_key() -> str:
     return time.strftime("%Y-%m-%d")
 
 
-async def auto_claim_all_plans(account: Account, *, skip_plan_ids: set[str] | None = None) -> list[dict]:
+def _early_window(now: float | None = None) -> bool:
+    """活动窗口刚开的几分钟：本地 23:00–23:02。
+
+    日套餐在 23:00 生效；领取轮对齐到 23:00:10 后，头几分钟用 60s 间隔重试，
+    避免上游投放晚几十秒就整晚领不到（用户手动领取通常也在 23:00–23:05）。
+    """
+    tm = time.localtime(now or time.time())
+    return tm.tm_hour == 23 and tm.tm_min < 3
+
+
+def _next_wait(now: float, interval: int, claimed: int) -> float:
+    """下一轮领取的等待秒数。
+
+    - 对齐 interval 的整点边界 +10s（600s → 23:00:10 / 23:10:10），不再漂相位；
+    - 窗口头（23:00–23:02）本轮没领到 → 60s 后追投，防上游投放晚几十秒。
+    """
+    wait = ((now // interval) + 1) * interval + 10 - now
+    if wait < 1:
+        wait = max(1.0, interval - 10)
+    if claimed == 0 and _early_window(now):
+        wait = min(wait, 60)
+    return wait
+
+
+async def auto_claim_all_plans(account: Account, *, skip_plan_ids: set[str] | None = None,
+                               force_activation: bool = False) -> list[dict]:
     """新账号入池自动领取：每日一次激活上报（preview 之前）→ preview → 逐个领取。
 
     入池链路的 fire-and-forget 收尾：任何失败只记日志/返回 outcome，绝不抛出
     （入池流程不受影响）。重复执行安全（上游 1003 已领取过幂等）。
     skip_plan_ids：本轮跳过领取的套餐 id（1005 名额等待期由 ClaimRoundManager
     记忆传入）；preview 仍照常执行，新套餐发现不受影响。
+    force_activation：23:00 窗口首轮强制补一次 app_launch/app_daily_active——
+    当天早些时候的上报可能早于套餐生效，活动投放要靠窗口内的新激活信号。
 
     激活上报时序（2.6.6 根因修复）：上报必须先于 preview——活动投放疑似以
     当日激活信号为资格（constants.ACTIVATION_ELEMENTS 注释、09-06 实证），
@@ -225,7 +252,7 @@ async def auto_claim_all_plans(account: Account, *, skip_plan_ids: set[str] | No
         return []
     outcomes: list[dict] = []
 
-    if _ACTIVATION_REPORTED.get(account.id) != _today_key():
+    if force_activation or _ACTIVATION_REPORTED.get(account.id) != _today_key():
         try:
             err = await report_activation_events(account)
             if err:
@@ -348,6 +375,38 @@ async def preview_plans(account: Account) -> list[dict]:
     return sorted(plans.values(), key=lambda p: (-p["priority"], p["plan_id"]))
 
 
+def _pending_grant_hint(account: Account, now: float | None = None) -> str | None:
+    """preview 为空时，用已同步的套餐判断「其实已领到、只是待生效」。
+
+    2026-11-02 实证：领取成功后上游立即撤下投放，紧接着的重复领取只能看到
+    空 preview —— 后台就报「暂无可领取的套餐」，把「已领取」误导成「领取
+    失败」。而 billing/balance 的 data.plans[] 里有一条 active 套餐、
+    entitlements[].effective_at 在未来（当晚 23:00）。有这个证据时给出准确
+    文案，而不是让用户反复重试。
+    """
+    now = now or time.time()
+    soon: float | None = None
+    for plan in [account.plan, *(account.plans or [])]:
+        if not isinstance(plan, dict):
+            continue
+        status = str(plan.get("status") or "").strip().lower()
+        if status and status != "active":
+            continue
+        for ent in plan.get("entitlements") or []:
+            if ent.get("meter") != "model_usage" or ent.get("unit_type") != "token":
+                continue
+            try:
+                eff = float(ent.get("effective_at") or 0)
+            except (TypeError, ValueError):
+                continue
+            if eff > now and (soon is None or eff < soon):
+                soon = eff
+    if soon is None:
+        return None
+    return ("该套餐已领取，赠送额度将于 "
+            f"{time.strftime('%H:%M', time.localtime(soon))} 生效（无需重复领取）")
+
+
 async def _auto_pick_plan(account: Account, plan_id: str | None) -> tuple[str, str, list]:
     """plan_id 为空时 preview 自动选优先级最高套餐。返回 (plan_id, plan_name, grants)。"""
     if plan_id:
@@ -356,6 +415,9 @@ async def _auto_pick_plan(account: Account, plan_id: str | None) -> tuple[str, s
     if not plans:
         # 两条通道（billing/preview + 运营位）都没有投放：通常是当日已领过
         # （领完上游就撤下投放），或活动没上线——不是故障，文案要说清
+        pending = _pending_grant_hint(account)
+        if pending:
+            raise ClaimError(pending)
         raise ClaimError("暂无可领取的套餐（当日已领取，或活动未开始）")
     best = plans[0]
     return best["plan_id"], best["name"] or best["plan_id"], best["grants"]
@@ -496,6 +558,8 @@ class ClaimRoundManager:
         self._claim_holds: dict[str, dict[str, int]] = {}
         # 无可服务账号的告警只在状态变化时发（持续故障期不逐轮刷屏）
         self._empty_warned = False
+        # 23:00 窗口首轮强制补激活上报：只做一次/天（避免每轮重复发日活事件）
+        self._window_activation_day: str | None = None
 
     async def _round(self) -> None:
         from .quota import refresh_accounts
@@ -519,6 +583,8 @@ class ClaimRoundManager:
         }
         self._claim_holds = holds
         claimed = 0
+        # 23:00 窗口首轮：当天早些时候的上报可能早于套餐生效，强制补一次激活
+        force_activation = _early_window() and self._window_activation_day != _today_key()
         for acc in accounts:
             acc_holds = holds.get(acc.id, {})
             if acc_holds:
@@ -526,7 +592,9 @@ class ClaimRoundManager:
                 logs.info("claim", f"账号 {acc.name} {len(acc_holds)} 个套餐名额等待中"
                                    f"（约 {int(soon)}s 后恢复重试）")
             try:
-                outcomes = await auto_claim_all_plans(acc, skip_plan_ids=set(acc_holds))
+                outcomes = await auto_claim_all_plans(
+                    acc, skip_plan_ids=set(acc_holds),
+                    force_activation=force_activation)
             except Exception as err:  # noqa: BLE001 - 单账号异常不中断整轮
                 logs.warn("claim", f"轮次领取 账号 {acc.name} 异常: {err}")
                 continue
@@ -555,8 +623,11 @@ class ClaimRoundManager:
                     await refresh_accounts([live])  # 领到额度立即反映到 UI
                 except Exception as err:  # noqa: BLE001
                     logs.warn("claim", f"轮次领取 账号 {acc.name} 额度刷新失败: {err}")
+        if force_activation:
+            self._window_activation_day = _today_key()
         if claimed:
             logs.ok("claim", f"自动领取轮完成: {claimed} 个账号有新套餐入账")
+        return claimed
 
     async def _loop(self) -> None:
         from .store import store
@@ -570,13 +641,16 @@ class ClaimRoundManager:
 
         while not self._stop.is_set():
             interval = store.claim_round_interval()  # 实时读取设置，改后即生效
+            claimed = 0
             if interval > 0:
                 try:
-                    await self._round()
+                    claimed = await self._round()
                 except Exception as err:  # noqa: BLE001 - 后台任务需吞掉异常继续运行
                     logs.err("claim", f"自动领取轮出错: {err}")
             # interval<=0 视为关闭：仍周期性回看设置，便于随时启用
             wait = interval if interval > 0 else 30
+            if interval > 0:
+                wait = _next_wait(time.time(), interval, claimed)
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=wait)
                 return

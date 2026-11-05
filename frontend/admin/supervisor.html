@@ -1,0 +1,927 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>zcode-hub · 续派工单</title>
+  <link href="/static/css/app.css?v={{APP_VERSION}}" rel="stylesheet">
+  <style>
+    .sup-main{max-width:1180px}
+    .sup-main .card{background:var(--panel);border:1px solid var(--hairline-soft);border-radius:var(--radius-xl);
+      padding:20px 22px;margin-bottom:16px;transition:border-color .18s ease}
+    .sup-main .card:hover{border-color:#353a45}
+    .card-hd{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:14px}
+    .card-title{font-family:var(--font-serif);font-size:15px;font-weight:600;letter-spacing:.02em}
+    .card-sub{margin-top:4px;font-size:12.5px;color:var(--ink-mute);line-height:1.7;max-width:780px}
+    .card-sub code{font-size:11.5px}
+    .hint{font-size:12px;color:var(--ink-mute);line-height:1.7}
+
+    /* 使用说明 */
+    .steps{display:grid;gap:12px}
+    .step{display:flex;gap:12px;align-items:flex-start}
+    .step .n{width:22px;height:22px;border-radius:50%;background:var(--amber);color:var(--amber-ink);
+      font-family:var(--mono);font-size:12px;font-weight:600;display:flex;align-items:center;
+      justify-content:center;flex:none;margin-top:1px}
+    .step .t{font-size:13px;font-weight:600}
+    .step p{margin-top:2px;font-size:12.5px;color:var(--ink-mute);line-height:1.75}
+    .step code{font-size:11.5px}
+    .how{margin-top:14px;border-top:1px solid var(--hairline-soft);padding-top:11px}
+    .how summary{cursor:pointer;font-size:12.5px;color:var(--amber);font-weight:600;list-style:none}
+    .how summary::-webkit-details-marker{display:none}
+    .how summary::before{content:'▸ ';font-size:11px}
+    .how[open] summary::before{content:'▾ '}
+    .flow{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:10px;font-size:12px;color:var(--ink-dim)}
+    .flow span{background:var(--panel-2);border:1px solid var(--hairline);border-radius:6px;padding:3px 8px}
+    .flow i{color:var(--ink-mute);font-style:normal}
+    .how p{margin-top:10px;font-size:12.5px;color:var(--ink-mute);line-height:1.75}
+
+    /* 状态指标卡 */
+    .sup-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
+    .sup-stat{background:var(--panel);border:1px solid var(--hairline-soft);border-radius:12px;padding:13px 15px;
+      display:flex;flex-direction:column;gap:6px;min-height:78px}
+    .sup-stat .k{font-size:11px;color:var(--ink-mute);display:flex;align-items:center;gap:6px}
+    .sup-stat .v{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:19px;font-weight:600;letter-spacing:-.02em}
+    .sup-stat .v.sm{font-size:12.5px;line-height:1.45;font-family:inherit;font-weight:500;letter-spacing:0}
+    .dot{width:7px;height:7px;border-radius:50%;background:var(--ink-mute);flex:none}
+    .dot.ok{background:var(--mint);box-shadow:0 0 0 3px rgba(98,195,112,.12)}
+    .dot.bad{background:var(--red);box-shadow:0 0 0 3px rgba(224,82,82,.12)}
+    .dot.warn{background:var(--amber);box-shadow:0 0 0 3px rgba(232,163,61,.12)}
+    .v.ok{color:var(--mint)} .v.bad{color:var(--red)} .v.warn{color:var(--amber)}
+
+    /* 监听名单为空时的停用提示 */
+    .sup-warn{display:flex;gap:9px;align-items:flex-start;margin-top:12px;padding:10px 12px;
+      border:1px solid rgba(232,163,61,.35);background:rgba(232,163,61,.07);border-radius:9px;
+      color:var(--amber);font-size:12px;line-height:1.65}
+    .sup-warn b{font-family:var(--mono);flex:none}
+
+    /* 双栏 */
+    .sup-grid2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.12fr);gap:16px;align-items:stretch;margin-bottom:16px}
+    .sup-col{display:flex;flex-direction:column;gap:16px;min-width:0}
+    .sup-col>.card{margin-bottom:0}
+    .sup-col>.card:last-child{flex:1}
+    .sup-grid2>.card{margin-bottom:0}
+    @media(max-width:1080px){ .sup-grid2{grid-template-columns:minmax(0,1fr)} .sess-list{max-height:520px} }
+
+    /* 续派控制 */
+    .ctl-row{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px 0;
+      border-bottom:1px solid var(--hairline-soft)}
+    .ctl-row:last-of-type{border-bottom:0}
+    .ctl-title{font-size:13px;font-weight:600}
+    .ctl-desc{margin-top:2px;font-size:12px;color:var(--ink-mute);line-height:1.6}
+    .ctl-block{margin-top:14px}
+    .ctl-label{font-size:12px;color:var(--ink-mute);margin-bottom:6px}
+
+    textarea.input, input.input{width:100%;background:var(--bg-2);border:1px solid var(--hairline);
+      border-radius:8px;color:var(--ink);padding:9px 11px;font-size:12.5px;line-height:1.7}
+    textarea.input:focus, input.input:focus{border-color:rgba(232,163,61,.55)}
+    .pending{margin-top:12px;border:1px solid rgba(232,163,61,.3);background:rgba(232,163,61,.07);
+      border-radius:10px;padding:10px 12px}
+    .pending .hd{font-size:12px;color:var(--amber);font-weight:600;margin-bottom:4px}
+    .pending pre{margin:0;max-height:96px;overflow:auto;white-space:pre-wrap;word-break:break-word;
+      font-family:var(--mono);font-size:11.5px;color:var(--ink-dim);line-height:1.65}
+    .btn-danger{background:transparent;border:1px solid rgba(224,82,82,.45);color:var(--red)}
+    .btn-danger:hover{background:rgba(224,82,82,.1)}
+    .btn-ghost{background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink-dim)}
+    .btn-ghost:hover{border-color:#3a3f4a;color:var(--ink)}
+    .btn-sm{height:30px;padding:0 11px;font-size:12px}
+
+    /* 会话监控 */
+    .sess-card{display:flex;flex-direction:column}
+    .sess-tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .sess-tools input{flex:1;min-width:180px}
+    .sess-count{font-size:12px;color:var(--ink-mute);white-space:nowrap}
+    .sess-list{margin-top:12px;flex:1;min-height:260px;overflow:auto;padding-right:4px}
+    .sess-group{margin-top:12px}
+    .sess-group:first-child{margin-top:0}
+    .sess-dir{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--ink-mute);
+      margin-bottom:4px;padding:0 4px;position:sticky;top:0;background:var(--panel);z-index:1}
+    .sess-dir .n{margin-left:auto;font-family:var(--mono);font-size:10.5px;opacity:.8}
+    .sess-row{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:7px;cursor:pointer;
+      transition:background .12s}
+    .sess-row:hover{background:rgba(255,255,255,.035)}
+    .sess-row.on{background:rgba(232,163,61,.08)}
+    .sess-row.live{background:rgba(98,195,112,.07);box-shadow:inset 2px 0 0 var(--mint)}
+    .sess-row input{accent-color:var(--amber);width:13px;height:13px;flex:none}
+    .slot-sel{background:var(--bg-2);border:1px solid var(--hairline);border-radius:6px;
+      color:var(--ink);font-size:11px;padding:3px 5px;flex:none;width:92px}
+    .slot-chip{display:inline-block;padding:0 6px;border-radius:6px;font-size:10.5px;
+      font-family:var(--mono);background:var(--panel-2);border:1px solid var(--hairline);color:var(--ink-mute)}
+    .sess-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px}
+    .sess-meta{font-size:11px;color:var(--ink-mute);white-space:nowrap;font-family:var(--mono);font-variant-numeric:tabular-nums}
+    .sess-badge{display:inline-flex;align-items:center;height:18px;padding:0 7px;border-radius:999px;font-size:10.5px;flex:none}
+    .sb-ok{color:var(--mint);background:rgba(98,195,112,.12)}
+    .sb-bad{color:var(--red);background:rgba(224,82,82,.12)}
+    .sb-warn{color:var(--amber);background:rgba(232,163,61,.12)}
+    .sb-idle{color:var(--ink-mute);background:var(--panel-2)}
+    /* 运行中徽标：五路无头会话在跑的唯一可见信号（2026-11-04 用户反馈「没转圈=没启动」） */
+    .sb-run{color:var(--mint);background:rgba(98,195,112,.12)}
+    .sb-run i{width:7px;height:7px;margin-right:5px;border-radius:50%;flex:none;
+      border:1.5px solid var(--mint);border-top-color:transparent;
+      animation:sb-spin .8s linear infinite}
+    @keyframes sb-spin{to{transform:rotate(360deg)}}
+    .sess-more{margin-top:10px;text-align:center}
+
+    /* 工单队列 */
+    .queue-form{display:grid;gap:10px}
+    .queue-form .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    @media(max-width:720px){ .queue-form .row2{grid-template-columns:1fr} }
+    .qf{display:grid;gap:4px}
+    .qf-k{font-size:11.5px;color:var(--ink-dim);display:flex;gap:6px;align-items:baseline;flex-wrap:wrap}
+    .qf-k span{color:var(--ink-mute);font-size:11px}
+    .queue-help{margin:2px 0 14px;border:1px solid var(--hairline-soft);border-radius:10px;
+      padding:12px 14px;background:var(--bg-2)}
+    .queue-help .qh-t{font-size:12.5px;font-weight:600;color:var(--ink-dim);margin-bottom:7px}
+    .qh-flow{display:flex;flex-wrap:wrap;gap:5px;align-items:center;font-size:11.5px;color:var(--ink-mute)}
+    .qh-flow span{background:var(--panel-2);border:1px solid var(--hairline);border-radius:5px;padding:2px 7px}
+    .qh-flow i{font-style:normal;opacity:.6}
+    .qh-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:5px 18px;margin-top:9px}
+    .qh-item{font-size:11.5px;line-height:1.65;color:var(--ink-mute)}
+    .qh-item b{color:var(--ink);font-weight:600}
+    .queue-help code{font-size:11px}
+
+    /* 额度自动派单 */
+    .auto-box{margin:4px 0 14px;border:1px solid rgba(232,163,61,.28);
+      background:rgba(232,163,61,.035);border-radius:10px;padding:12px 14px}
+    .auto-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+    .auto-t{font-family:var(--font-serif);font-size:15px;font-weight:600;letter-spacing:.02em;
+      display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+    .auto-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:10px}
+    @media(max-width:720px){ .auto-grid{grid-template-columns:1fr} }
+    .auto-status{margin-top:8px;font-size:12px;line-height:1.65;color:var(--ink-mute)}
+    .auto-status b{color:var(--amber);font-weight:600}
+    .auto-status .ok{color:var(--mint)} .auto-status .bad{color:var(--red)}
+    .sup-table{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:12px}
+    .sup-table th,.sup-table td{padding:8px 10px;text-align:left;border-bottom:1px solid var(--hairline-soft);vertical-align:top}
+    .sup-table th{color:var(--ink-mute);white-space:nowrap;font-weight:500;font-size:11.5px}
+    .sup-table tr:hover td{background:rgba(255,255,255,.02)}
+    .sup-note{max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink-mute)}
+    .sup-st{display:inline-block;padding:1px 8px;border-radius:9px;font-size:11px;font-weight:600;white-space:nowrap}
+    .sup-st.queued{background:rgba(120,140,255,.15);color:#8ea2ff}
+    .sup-st.dispatched{background:rgba(255,180,60,.15);color:#ffb43c}
+    .sup-st.done{background:rgba(60,180,120,.15);color:#3cb478}
+    .sup-st.failed{background:rgba(230,80,80,.15);color:#e65050}
+    .sup-st.cancelled{background:rgba(150,150,150,.15);color:#999}
+    .empty{padding:22px 0;text-align:center;color:var(--ink-mute);font-size:12.5px}
+
+    /* 日志 */
+    .sup-log{margin-top:10px;max-height:260px;overflow:auto;background:var(--bg-2);
+      border:1px solid var(--hairline);border-radius:8px;padding:10px 12px;
+      font-family:var(--mono);font-size:11.5px;line-height:1.7;white-space:pre-wrap;word-break:break-all;
+      color:var(--ink-dim)}
+    details.card summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px}
+    details.card summary::-webkit-details-marker{display:none}
+    details.card summary .chev{transition:transform .15s;color:var(--ink-mute)}
+    details.card[open] summary .chev{transform:rotate(90deg)}
+    /* 通道硬闸封锁横幅 */
+    .guard-banner{display:flex;gap:10px;align-items:center;flex-wrap:wrap;
+      background:rgba(230,80,80,.12);border:1px solid rgba(230,80,80,.45);
+      color:#ff9a9a;border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:12.5px}
+    .guard-banner b{color:#ff6b6b}
+    .guard-banner .grow{flex:1;min-width:240px;line-height:1.6}
+  </style>
+</head>
+<body>
+<div id="admin-header" data-active="/admin/supervisor"></div>
+
+<main class="admin-main sup-main">
+  <div class="page-hd">
+    <div>
+      <div class="page-title">续派工单</div>
+      <div class="page-sub">只续派绑定的会话 · 多炉位并行（5 会话 = 5 条任务流） · 剩余额度自动派单</div>
+    </div>
+    <div class="page-actions">
+      <button class="page-action-btn" onclick="loadAll(true)">刷新</button>
+    </div>
+  </div>
+
+  <div id="guard-banner" class="guard-banner" style="display:none">
+    <b>⛔ 通道硬闸已封锁</b>
+    <span class="grow" id="guard-reason">—</span>
+    <button class="btn btn-primary btn-sm" onclick="guardUnblock()">确认 GUI 模型正确，解除封锁</button>
+  </div>
+
+  <!-- 使用说明 -->
+  <div class="card">
+    <div class="card-hd" style="margin-bottom:12px">
+      <div>
+        <div class="card-title">怎么用 · 3 步跑起来</div>
+        <div class="card-sub">核心规则只有一条：<b>只有「会话监控」里勾选的对话才会被续派</b>；一个都不勾，整个功能不工作。</div>
+      </div>
+    </div>
+    <div class="steps">
+      <div class="step"><span class="n">1</span><div>
+        <div class="t">启用 Stop 钩子插件（只需一次）</div>
+        <p>在 ZCode 插件设置里启用 <code>zcode-supervisor-continue</code>，然后<b>重启 ZCode</b>。
+           上方「Stop 钩子」显示<b>已启用</b>才算装好；重启网关不算。</p>
+      </div></div>
+      <div class="step"><span class="n">2</span><div>
+        <div class="t">勾选要接管的对话（必做）</div>
+        <p>在右侧「会话监控」给对话<b>选炉位</b>（main/s2…s5）→ 点<b>保存监听名单</b>。每个炉位是一条
+           独立任务流（互不抢单）；一个都没绑 = 功能停用。名单存在 <code>data/_sup/continue.sessions</code>。</p>
+      </div></div>
+      <div class="step"><span class="n">3</span><div>
+        <div class="t">打开总闸，给它一条指令</div>
+        <p>① <b>临时接续</b>：在左侧输入一句话 → 下发。被勾选的会话下一次回合结束时注入一次，
+           然后指令自动归档，不会重复；<br>
+           ② <b>连续干活</b>：在下方「工单队列」入队，每单跑完自动验收，再派下一单；<br>
+           ③ <b>烧剩余额度</b>：在左侧「额度自动派单」开启，队列空且剩余额度高于阈值时，自动派
+           「先总结进展、再执行下一项」的工单，任务由 agent 每轮写回。</p>
+      </div></div>
+    </div>
+    <details class="how">
+      <summary>它是怎么工作的？（点开看完整判定链）</summary>
+      <div class="flow">
+        <span>ZCode 回合结束</span><i>→</i><span>Stop 钩子</span><i>→</i><span>总闸开？</span><i>→</i>
+        <span>会话在监听名单？</span><i>→</i><span>有 next-prompt.txt？</span><i>→</i>
+        <span>额度够？</span><i>→</i><span>注入指令继续</span>
+      </div>
+      <p><b>任何一步不满足，钩子就放行停止</b>（ZCode 正常结束回合），并把原因写进日志。
+         指令是<b>一次性</b>的：注入后 <code>next-prompt.txt</code> 立即归档为
+         <code>next-prompt.used-&lt;时间&gt;.txt</code>，所以同一条指令不会每回合重复执行。
+         未勾选的对话即使停下，也绝不会被注入任何内容。</p>
+      <p><b>工单队列</b>在后台每 10 秒巡检：总闸开 + 监听名单非空 + 无待发指令 → 把下一单写进
+         <code>next-prompt.txt</code> → 被勾选的会话消费 → 按 <code>watch</code> 文件变化和
+         <code>verify</code> 命令（exit 0）验收 → 通过 <code>done</code>，失败按重试次数重排或 <code>failed</code>。</p>
+      <p>文件都在 <code>data/_sup/</code>：<code>continue.enabled</code>（总闸）、
+         <code>continue.sessions</code>（监听名单，必需）、<code>next-prompt.txt</code>（一次性指令）。
+         每次钩子触发都会在 <code>hook.log</code> 记录启动、输入、配置、每道判定和最终结果。</p>
+    </details>
+  </div>
+
+  <!-- 状态指标 -->
+  <div class="sup-stats">
+    <div class="sup-stat" title="ZCode 是否加载了 Stop 钩子插件"><div class="k"><span class="dot" id="dot-plugin"></span>Stop 钩子</div><div class="v" id="st-plugin">—</div></div>
+    <div class="sup-stat" title="continue.enabled 文件；关闭后钩子对任何会话都放行"><div class="k"><span class="dot" id="dot-enabled"></span>总闸</div><div class="v" id="st-enabled">—</div></div>
+    <div class="sup-stat" title="continue.sessions 里绑定的会话数；0 = 续派停用"><div class="k">已监听会话</div><div class="v sm" id="st-sessions">—</div></div>
+    <div class="sup-stat" title="next-prompt.txt 是否有一条等待注入的一次性指令"><div class="k">待发指令</div><div class="v sm" id="st-pending">—</div></div>
+    <div class="sup-stat" title="hook-state.json 里记录的累计续派次数"><div class="k">历史续派</div><div class="v" id="st-count">—</div></div>
+    <div class="sup-stat" title="钩子上一次触发的最终判定"><div class="k">上次判定</div><div class="v sm" id="st-last">—</div></div>
+  </div>
+
+  <div class="sup-grid2">
+    <!-- 左列：续派控制 + 额度自动派单 -->
+    <div class="sup-col">
+    <!-- 左：续派控制 -->
+    <div class="card">
+      <div class="card-hd">
+        <div>
+          <div class="card-title">续派控制</div>
+          <div class="card-sub">总闸只管开/关；真正决定「对谁生效」的是右侧监听名单。指令一次性，注入后自动归档。</div>
+        </div>
+      </div>
+
+      <div class="ctl-row">
+        <div>
+          <div class="ctl-title">总闸</div>
+          <div class="ctl-desc">关闭后 Stop 钩子对任何会话都直接放行停止。</div>
+        </div>
+        <button id="btn-enabled" class="btn btn-sm" onclick="supToggle('enabled', !supState.enabled)">—</button>
+      </div>
+
+      <div id="sess-warn" class="sup-warn" style="display:none">
+        <b>!</b><span>监听名单为空：现在不会续派任何会话。先到右侧勾选对话并保存。</span>
+      </div>
+
+      <div class="ctl-block">
+        <div class="ctl-label">一次性指令（写入 next-prompt.txt）<span id="pending-flag" style="display:none;color:var(--amber)"> · 当前有待发指令</span></div>
+        <textarea id="sup-prompt" class="input" rows="3"
+          placeholder="写一条一次性续派指令，例如：继续把舞狮批的备份和登记补完，完成后停下"></textarea>
+        <div class="ctl-desc" style="margin-top:6px">只对监听名单里的会话生效；被消费一次后立即归档，不会重复执行。</div>
+        <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+          <button class="btn btn-primary btn-sm" onclick="supSend()">下发一次性指令</button>
+          <button class="btn btn-ghost btn-sm" onclick="supPrompt('')">清空待发</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 额度自动派单 -->
+    <div class="card">
+    <div class="auto-box" style="margin:0;border:0;background:transparent;padding:0">
+      <div class="auto-top">
+        <div>
+          <div class="auto-t">额度自动派单 <span class="hint" style="font-weight:400">剩余额度高于阈值时自动续派</span></div>
+          <div class="hint" style="margin-top:4px">每轮把进展写进 <code>auto-handoff[.&lt;炉位&gt;].md</code>，下一项任务由 agent 写回 <code>auto-task[.&lt;炉位&gt;].txt</code>；写 <code>STOP</code> 即结束。用户手排的工单永远优先。</div>
+        </div>
+        <button id="btn-auto" class="btn btn-sm" onclick="autoToggle()">—</button>
+      </div>
+      <div id="auto-tabs" style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap"></div>
+      <div class="auto-status" id="auto-status">加载中…</div>
+      <div class="auto-grid">
+        <div class="qf">
+          <div class="qf-k">剩余额度阈值<span>低于此值全部停止</span></div>
+          <input id="auto-min" class="input" type="number" min="0" placeholder="10000000">
+        </div>
+        <div class="qf">
+          <div class="qf-k">每炉位最多轮数<span>一次开启的上限</span></div>
+          <input id="auto-rounds" class="input" type="number" min="1" placeholder="20">
+        </div>
+        <div class="qf">
+          <div class="qf-k">连续同一任务上限<span>防原地打转</span></div>
+          <input id="auto-same" class="input" type="number" min="1" placeholder="2">
+        </div>
+      </div>
+      <div class="qf" style="margin-top:10px">
+        <div class="qf-k">下一项任务（<span id="auto-task-file">auto-task.txt</span>）<span id="auto-task-flag"></span></div>
+        <textarea id="auto-task" class="input" rows="3" oninput="_autoTaskDirty=true"
+          placeholder="例：阅读轨道计划 §4，执行下一个未完成任务；本轮只做一个。"></textarea>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+        <button class="btn btn-primary btn-sm" onclick="saveAutoTask()">保存下一项任务</button>
+        <button class="btn btn-ghost btn-sm" onclick="saveAutoCfg()">保存参数</button>
+        <button id="btn-revive" class="btn btn-ghost btn-sm" onclick="reviverToggle()">唤醒器 —</button>
+        <button class="btn btn-ghost btn-sm" onclick="reviverTick()">立即巡检</button>
+        <button class="btn btn-ghost btn-sm" onclick="resetAuto()">复位当前炉位轮数</button>
+      </div>
+    </div>
+    </div>
+    </div><!-- /sup-col -->
+
+    <!-- 右：会话监控 -->
+    <div class="card sess-card">
+      <div class="card-hd">
+        <div>
+          <div class="card-title">会话监控</div>
+          <div class="card-sub">只读 ZCode 会话库（<code>~/.zcode/cli/db/db.sqlite</code>）。每行选一个炉位并保存：
+            一个炉位 = 一条独立任务流（5 个会话绑 s2…s5 + main 即 5 路并行）；「不监听」= 该对话永远不会被续派。</div>
+        </div>
+      </div>
+      <div class="sess-tools">
+        <input id="sess-q" class="input" placeholder="按标题 / 项目过滤" oninput="renderSessions(true)">
+        <button class="btn btn-primary btn-sm" onclick="saveSessions()">保存监听名单</button>
+      </div>
+      <div class="sess-count" id="sess-meta" style="margin-top:8px">加载中…</div>
+      <div class="sess-list" id="sessions-body"><div class="empty">加载中…</div></div>
+      <div class="sess-more" id="sess-more" style="display:none">
+        <button class="btn btn-ghost btn-sm" onclick="showMoreSessions()">显示更多</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 工单队列 -->
+  <div class="card">
+    <div class="card-hd">
+      <div>
+        <div class="card-title">工单队列</div>
+        <div class="card-sub">派单 = 写 <code>next-prompt.txt</code>（钩子一次性消费）；验收 = watch 文件变化 + verify 命令（exit 0 通过）。
+          派单同样只由监听名单里的会话消费；名单为空时队列会停在排队状态。</div>
+      </div>
+      <div class="sess-tools">
+        <span class="hint" id="poller-line"></span>
+        <button class="btn btn-ghost btn-sm" onclick="dispatchNow()">立即派单</button>
+        <button class="btn btn-ghost btn-sm" onclick="clearDone()">清已完成</button>
+      </div>
+    </div>
+
+    <div id="queue-warn" class="sup-warn" style="display:none">
+      <b>!</b><span id="queue-warn-text"></span>
+    </div>
+
+    <div class="queue-help">
+      <div class="qh-t">工单怎么跑 · 一次说清</div>
+      <div class="qh-flow">
+        <span>入队</span><i>→</i><span>后台每 10s 巡检</span><i>→</i><span>写 next-prompt.txt</span><i>→</i>
+        <span>监听会话消费</span><i>→</i><span>watch 有变化</span><i>→</i><span>verify exit 0</span><i>→</i><span>完成</span>
+      </div>
+      <div class="qh-grid">
+        <div class="qh-item"><b>工单标题</b>：只用于列表展示，随便起。</div>
+        <div class="qh-item"><b>工单指令</b>：会话真正收到的内容。写清完成标准，结尾加「完成后停下」。</div>
+        <div class="qh-item"><b>watch 文件</b>：逗号分隔。派单时记录修改时间，回合结束后这些文件有变化才验收；不填通常会被判失败。</div>
+        <div class="qh-item"><b>verify 命令</b>：watch 有变化后执行，exit 0 = 通过；不填则有变化就算通过。</div>
+        <div class="qh-item"><b>verify 工作目录</b>：命令在哪个目录执行；命令里有相对路径时必填。</div>
+        <div class="qh-item"><b>失败重试次数</b>：验收失败后自动重排几次；0 = 失败即弃单。</div>
+      </div>
+      <div class="qh-item" style="margin-top:8px">
+        状态：<b>排队</b> 等派单 · <b>执行中</b> 指令已写入、等会话消费/验收 · <b>完成</b> 验收通过 ·
+        <b>失败</b> 重试耗尽 · <b>已取消</b> 人工取消。
+        「立即派单」= 不等 10 秒轮询，马上巡检一次；「清已完成」只清完成和已取消的工单。
+      </div>
+    </div>
+
+    <div class="queue-form">
+      <div class="qf">
+        <div class="qf-k">工单标题<span>列表展示用</span></div>
+        <input id="wo-title" class="input" placeholder="例：铁道后十景全链">
+      </div>
+      <div class="qf">
+        <div class="qf-k">工单指令<span>会话收到的内容，写清完成标准</span></div>
+        <textarea id="wo-prompt" class="input" rows="3"
+          placeholder="例：把 docs/铁道.md 的后十景补完并跑 pytest；全部通过后停下。"></textarea>
+      </div>
+      <div class="row2">
+        <div class="qf">
+          <div class="qf-k">watch 文件（可选）<span>逗号分隔</span></div>
+          <input id="wo-watch" class="input" placeholder="例：docs/铁道.md, data/out.json">
+        </div>
+        <div class="qf">
+          <div class="qf-k">verify 命令（可选）<span>exit 0 = 通过</span></div>
+          <input id="wo-verify" class="input" placeholder="例：python -m pytest -q">
+        </div>
+      </div>
+      <div class="row2">
+        <div class="qf">
+          <div class="qf-k">verify 工作目录（可选）<span>相对路径必填</span></div>
+          <input id="wo-cwd" class="input" placeholder="例：E:/数据/AI/zcode-hub">
+        </div>
+        <div class="qf">
+          <div class="qf-k">失败重试次数<span>0 = 不重试</span></div>
+          <input id="wo-retries" class="input" type="number" min="0" value="1">
+        </div>
+      </div>
+      <div class="row2">
+        <div class="qf">
+          <div class="qf-k">炉位<span>哪个会话消费这一单</span></div>
+          <select id="wo-slot" class="input" style="width:100%">
+            <option value="main">main 主炉</option>
+            <option value="s2">s2</option>
+            <option value="s3">s3</option>
+            <option value="s4">s4</option>
+            <option value="s5">s5</option>
+          </select>
+        </div>
+        <div class="qf" style="align-self:end">
+          <button class="btn btn-primary btn-sm" onclick="enqueue()">入队</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="queue-body"><div class="empty">加载中…</div></div>
+  </div>
+
+  <!-- 钩子日志 -->
+  <details class="card" id="hooklog-card">
+    <summary class="card-title"><span class="chev">▶</span>Stop 钩子日志 <span class="hint" id="hooklog-meta" style="font-weight:400"></span>
+      <span class="hint" style="font-weight:400">· 每次触发记录：启动 / 输入 / 配置 / 每道判定 / 结果</span></summary>
+    <div class="sup-log" id="hooklog-body">展开后加载…</div>
+  </details>
+</main>
+
+<script src="/static/js/auth.js?v={{APP_VERSION}}"></script>
+<script src="/static/js/toast.js?v={{APP_VERSION}}"></script>
+<script src="/static/js/header.js?v={{APP_VERSION}}"></script>
+<script>
+(async()=>{
+  await renderAdminHeader();
+  const key=await adminKey.get();
+  if(!key||!await verifyKey(ADMIN_API+'/verify',key).catch(()=>false))return location.href='/admin/login';
+  await loadAll(true);
+  setInterval(()=>{if(!document.hidden)loadAll();},5000);
+})();
+
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+function fmtTime(ts){if(!ts)return '—';const d=new Date(Number(ts));return isNaN(d)?'—':d.toLocaleString();}
+
+let supState={enabled:false,sessions:[],count:0,last:{}};
+let _sessDirty=false, _sessFetchedAt=0, _sessSig='';
+let _sessions=[], _slots=new Map(), _sessExpanded=false;
+let _busySig='';   // 唤醒器眼中「正在跑」的会话集合（pid 存活的炉位）
+const SLOT_OPTS=['main','s2','s3','s4','s5'];
+
+async function loadAll(force){
+  await Promise.all([loadSup(force),loadSessions(force),loadQueue(),loadHookLog()]);
+}
+
+function _setStat(id,text,tone,extra){
+  const el=document.getElementById(id);
+  if(!el)return;
+  el.textContent=text;
+  el.className='v'+(extra?' '+extra:'')+(tone?' '+tone:'');
+}
+function _setDot(id,tone){
+  const el=document.getElementById(id);
+  if(el)el.className='dot'+(tone?' '+tone:'');
+}
+
+async function loadSup(force){
+  try{
+    const s=await api('GET','/supervisor');
+    supState=s;
+    const pluginOk=s.plugin&&s.plugin.enabled===true;
+    _setStat('st-plugin',pluginOk?'已启用':(s.plugin&&s.plugin.enabled===false?'未启用':'未知'),pluginOk?'ok':'bad');
+    _setDot('dot-plugin',pluginOk?'ok':'bad');
+    _setStat('st-enabled',s.enabled?'开启':'关闭',s.enabled?'ok':null);
+    _setDot('dot-enabled',s.enabled?'ok':null);
+    const n=(s.sessions||[]).length;
+    _setStat('st-sessions',n?String(n):'0 · 停用',n?'ok':'warn','sm');
+    _setStat('st-pending',s.prompt?'有 · 待注入':'无',s.prompt?'warn':null,'sm');
+    _setStat('st-count',String(s.count||0),null);
+    const last=s.last||{};
+    const lastEl=document.getElementById('st-last');
+    if(lastEl){
+      const lbl=last.decision==='continued'?'已续派':(last.decision?'已放行':'暂无记录');
+      _setStat('st-last',lbl,last.decision==='continued'?'ok':(last.decision?'warn':null),'sm');
+      const when=last.at?fmtTime(last.at):'';
+      lastEl.title=[when,last.reason||''].filter(Boolean).join(' · ')||'钩子还没触发过';
+    }
+    const warn=document.getElementById('sess-warn');
+    if(warn)warn.style.display=n?'none':'flex';
+
+    const be=document.getElementById('btn-enabled');
+    if(be){be.textContent=s.enabled?'已开启 · 点击关闭':'已关闭 · 点击开启';be.className='btn btn-sm '+(s.enabled?'btn-ghost':'btn-primary');}
+
+    const ta=document.getElementById('sup-prompt');
+    if(ta && document.activeElement!==ta)ta.value=s.prompt||'';
+    const flag=document.getElementById('pending-flag');
+    if(flag)flag.style.display=s.prompt?'inline':'none';
+    if(!_sessDirty){
+      const key=m=>[...m.entries()].sort().map(([k,v])=>k+'|'+v).join(',');
+      const before=key(_slots);
+      _slots=new Map((s.sessions||[]).map(ln=>{
+        const [id, slot]=String(ln).split('|');
+        return [id.trim(), (slot||'main').trim().toLowerCase()||'main'];
+      }));
+      if(key(_slots)!==before) syncSessionSel();
+    }
+  }catch(e){
+    showToast('状态加载失败: '+e.message,'error');
+  }
+}
+
+async function supToggle(kind,want){
+  try{
+    await api('POST','/supervisor/'+kind,{enabled:want});
+    showToast(want?'总闸已开启':'总闸已关闭','success');
+    await loadSup(true);
+  }catch(e){showToast('操作失败: '+e.message,'error');}
+}
+async function supPrompt(text){
+  try{
+    await api('POST','/supervisor/prompt',{text});
+    showToast(text?'一次性指令已下发（回合结束即执行一次）':'待发指令已清空','success');
+    await loadSup(true);
+  }catch(e){showToast('操作失败: '+e.message,'error');}
+}
+async function supSend(){
+  const v=(document.getElementById('sup-prompt')||{}).value||'';
+  if(!v.trim()){showToast('先写指令再下发','error');return;}
+  await supPrompt(v.trim());
+}
+
+/* ── 会话监控 ─────────────────────────────────────────────────────────── */
+async function loadSessions(force){
+  if(!force && Date.now()-_sessFetchedAt<9000) return;
+  _sessFetchedAt=Date.now();
+  try{
+    const r=await api('GET','/sessions?limit=100');
+    _sessions=r.sessions||[];
+    if(r.error){
+      document.getElementById('sessions-body').innerHTML=`<div class="empty">读取会话库失败：${esc(r.error)}</div>`;
+      return;
+    }
+    const sig=_sessions.map(x=>x.id+':'+x.updated_at+':'+x.messages+':'+x.outcome).join('|');
+    if(sig!==_sessSig || force){ _sessSig=sig; renderSessions(); }
+    else { syncSessionSel(); }
+  }catch(e){
+    document.getElementById('sessions-body').innerHTML=`<div class="empty">会话列表加载失败：${esc(e.message)}</div>`;
+  }
+}
+function _outcomeMeta(o){
+  return ({completed:['sb-ok','完成'],error:['sb-bad','出错'],interrupted:['sb-warn','中断']})[o]||['sb-idle','进行中'];
+}
+function fmtAgo(ts){
+  if(!ts)return '—';
+  const s=Math.max(0,Date.now()/1000-Number(ts));
+  if(s<60)return Math.round(s)+'秒前';
+  if(s<3600)return Math.round(s/60)+'分钟前';
+  if(s<86400)return Math.round(s/3600)+'小时前';
+  return Math.round(s/86400)+'天前';
+}
+function _shortDir(d){
+  const parts=String(d||'').split(/[\\/]/).filter(Boolean);
+  return parts.length>2?parts.slice(-2).join('/'):(d||'(未知项目)');
+}
+function setSessionSlot(id,slot){
+  if(slot)_slots.set(id,slot); else _slots.delete(id);
+  const saved=[...new Set(supState.sessions||[])].sort().join(',');
+  const lines=[..._slots.entries()].sort().map(([sid,s])=>s==='main'?sid:`${sid}|${s}`).join(',');
+  _sessDirty=(lines!==saved);
+  syncSessionSel();
+}
+function syncSessionSel(){
+  document.querySelectorAll('#sessions-body select[data-sid]').forEach(sel=>{
+    const id=sel.getAttribute('data-sid');
+    const slot=_slots.get(id)||'';
+    if(sel.value!==slot)sel.value=slot;
+    const row=sel.closest('.sess-row');
+    if(row)row.classList.toggle('on',!!slot);
+  });
+  const meta=document.getElementById('sess-meta');
+  if(meta)meta.textContent=`共 ${_sessions.length} 个会话，已绑定 ${_slots.size} 个${_sessDirty?'（未保存）':''}`;
+}
+function _busySessions(){
+  // reviver.slots: {slot:{pid,alive,session}} —— alive 即该炉位 headless CLI 还在跑
+  const slots=((_burnerState||{}).reviver||{}).slots||{};
+  const out=new Set();
+  for(const st of Object.values(slots)){
+    if(st&&st.alive&&st.session)out.add(st.session);
+  }
+  return out;
+}
+function renderSessions(force){
+  if(!force && document.querySelector('#sessions-body')?.contains(document.activeElement)) return;
+  const box=document.getElementById('sessions-body');
+  if(!box)return;
+  const q=((document.getElementById('sess-q')||{}).value||'').trim().toLowerCase();
+  const list=_sessions.filter(s=>!q || (s.title||'').toLowerCase().includes(q)
+    || (s.directory||'').toLowerCase().includes(q));
+  const groups=new Map();
+  for(const s of list){
+    const k=s.directory||'(未知项目)';
+    if(!groups.has(k))groups.set(k,[]);
+    groups.get(k).push(s);
+  }
+  const MAX=(_sessExpanded||q)?9999:18;
+  let shown=0, html='';
+  const busy=_busySessions();
+  for(const [dir,items] of groups){
+    if(shown>=MAX)break;
+    html+=`<div class="sess-group"><div class="sess-dir" title="${esc(dir)}">${esc(_shortDir(dir))}<span class="n">${items.length}</span></div>`;
+    for(const s of items){
+      if(shown>=MAX)break;
+      shown++;
+      const [cls,label]=_outcomeMeta(s.outcome);
+      const slot=_slots.get(s.id)||'';
+      const busy=_busy.has(s.id);
+      html+=`<label class="sess-row${slot?' on':''}${busy?' live':''}" title="${esc(s.title)}">
+        <select class="slot-sel" data-sid="${esc(s.id)}" onchange="setSessionSlot(this.getAttribute('data-sid'),this.value)">
+          <option value=""${slot?'':' selected'}>不监听</option>
+          ${SLOT_OPTS.map(o=>`<option value="${o}"${slot===o?' selected':''}>${o==='main'?'main 主炉':o}</option>`).join('')}
+        </select>
+        <span class="sess-title">${esc(s.title)}</span>
+        <span class="sess-badge ${busy?'sb-run':cls}">${busy?'<i></i>运行中':label}</span>
+        <span class="sess-meta">${s.messages||0} 条 · ${fmtAgo(s.updated_at)}</span>
+      </label>`;
+    }
+    html+='</div>';
+  }
+  box.innerHTML=html||'<div class="empty">没有匹配的会话。</div>';
+  const more=document.getElementById('sess-more');
+  if(more){
+    const hidden=list.length-shown;
+    more.style.display=(!_sessExpanded&&!q&&hidden>0)?'block':'none';
+    const btn=more.querySelector('button');
+    if(btn&&hidden>0)btn.textContent=`显示更多（还有 ${hidden} 个）`;
+  }
+  const meta=document.getElementById('sess-meta');
+  if(meta)meta.textContent=`共 ${_sessions.length} 个会话，已绑定 ${_slots.size} 个${_sessDirty?'（未保存）':''}`;
+}
+function showMoreSessions(){ _sessExpanded=true; renderSessions(true); }
+async function saveSessions(){
+  const lines=[..._slots.entries()].sort()
+    .map(([sid,s])=>s==='main'?sid:`${sid}|${s}`);
+  try{
+    await api('POST','/supervisor/sessions',{sessions:lines});
+    _sessDirty=false;
+    syncSessionSel();
+    showToast(_slots.size?`监听名单已保存（${_slots.size} 个会话，炉位：${[...new Set(_slots.values())].join(' / ')}）`:'监听名单已清空：续派已停用','success');
+    await loadSup(true);
+  }catch(e){showToast('保存失败: '+e.message,'error');}
+}
+
+/* ── 工单队列 ─────────────────────────────────────────────────────────── */
+const ST={queued:'排队',dispatched:'执行中',done:'完成',failed:'失败',cancelled:'已取消'};
+const TICK_ACT={idle:'空闲',dispatched:'已派单',running:'执行中',accepted:'已验收',wait:'等待',error:'异常',multi:'多炉位推进'};
+let _burnerState={slots:{},auto:{}};
+let _autoSlot='main';
+let _autoTaskDirty=false;
+function fmtNum(n){return Number(n||0).toLocaleString('en-US');}
+function _slotOpts(){const s=new Set(['main',...Object.keys(_burnerState.slots||{})]);
+  return SLOT_OPTS.filter(o=>s.has(o)).concat([...s].filter(o=>!SLOT_OPTS.includes(o)).sort());}
+function updateAuto(s){
+  _burnerState=s||{};
+  const slots=s.slots||{};
+  const on=!!s.enabled;
+  const btn=document.getElementById('btn-auto');
+  if(btn){btn.textContent=on?'已开启 · 点击关闭':'已关闭 · 点击开启';
+    btn.className='btn btn-sm '+(on?'btn-danger':'btn-primary');}
+  const tabs=document.getElementById('auto-tabs');
+  if(tabs){
+    tabs.innerHTML=_slotOpts().map(o=>{
+      const cur=slots[o]||{};
+      const n=(cur.auto&&cur.auto.rounds)||0;
+      const bad=cur.auto&&cur.auto.paused;
+      return `<button class="btn btn-sm ${_autoSlot===o?'btn-primary':'btn-ghost'}" onclick="switchAutoSlot('${o}')">${o}${n?` · ${n}轮`:''}${bad?' · ⚠':''}</button>`;
+    }).join('');
+  }
+  const cur=slots[_autoSlot]||{auto:{}};
+  const a=cur.auto||{};
+  const st=document.getElementById('auto-status');
+  if(st){
+    const bits=[];
+    bits.push(on?`已开启（剩余额度 <b>${fmtNum(a.remaining)}</b> / 阈值 ${fmtNum(a.minRemaining)}）`:'未开启：不会自动生成工单');
+    const nmon=Array.isArray(cur.monitored)?cur.monitored.length:(cur.monitored||0);
+    bits.push(`绑定会话 ${nmon} 个`);
+    bits.push(`已自动派 <b>${a.rounds||0}</b> / ${a.maxRounds||0} 轮`);
+    if(a.paused)bits.push(`<span class="bad">已暂停：${esc(a.pausedReason||'')}</span>`);
+    if(on&&!(supState.sessions||[]).length)bits.push('<span class="bad">监听名单为空，自动派单不会启动</span>');
+    const rv=s.reviver||{};
+    bits.push(`唤醒器 ${rv.enabled?(rv.running?'运行中':'已开启'):'关闭'}`);
+    const lt=rv.lastTick||{};
+    if(lt.action==='woke')bits.push(`刚唤醒 ${lt.n||0} 个`);
+    else if(lt.reason)bits.push(esc(lt.reason));
+    if(Array.isArray(lt.results)&&lt.results.length){
+      bits.push('<span class="muted">'+esc(lt.results.map(x=>
+        `${x.slot}:${x.action}${x.tokens?`·${fmtNum(x.tokens)}tok`:''}`).join('  '))+'</span>');
+    }
+    const cp=rv.clientPatch||{};
+    if(cp.exists&&cp.patched)bits.push(`客户端续派上限 ${cp.cap}`);
+    else if(cp.exists)bits.push(`<span class="bad">客户端续派上限未打补丁（cap=${esc(String(cp.cap))}），重启/更新后要重打</span>`);
+    if(rv.slots&&Object.keys(rv.slots).length){
+      const alive=Object.entries(rv.slots).filter(([,v])=>v.alive).length;
+      bits.push(`唤醒进程 ${alive} 个存活`);
+    }
+    const mg=rv.modelGuard||{};
+    const lg=rv.lastGuard||{};
+    if(Array.isArray(lg.results)&&lg.results.length){
+      bits.push('<span class="muted">通道 '+esc(lg.results.map(x=>
+        `${x.slot}:${x.action}${x.channel?`·${x.channel}`:''}`).join('  '))+'</span>');
+    }
+    const gb=document.getElementById('guard-banner');
+    const gbs=mg.blocks||{};
+    if(gb){
+      if(gbs.locked){
+        gb.style.display='flex';
+        const gr=document.getElementById('guard-reason');
+        if(gr)gr.textContent=`${gbs.reason||'检测到非网关模型'}。白名单：${(mg.allow||[]).join(' / ')||'—'}；`+
+          '已终止进程、摘除监听并停止全部唤醒，通道确认正确后手动解除。';
+      }else{
+        gb.style.display='none';
+      }
+    }
+    const rb=document.getElementById('btn-revive');
+    if(rb){rb.textContent=rv.enabled?'唤醒器 开 · 点击关闭':'唤醒器 关 · 点击开启';
+      rb.className='btn btn-sm '+(rv.enabled?'btn-ghost':'btn-primary');}
+    st.innerHTML=`<b>[${_autoSlot}]</b> `+bits.join(' · ');
+  }
+  const min=document.getElementById('auto-min');
+  if(min&&document.activeElement!==min)min.value=a.minRemaining??'';
+  const rounds=document.getElementById('auto-rounds');
+  if(rounds&&document.activeElement!==rounds)rounds.value=a.maxRounds??'';
+  const same=document.getElementById('auto-same');
+  if(same&&document.activeElement!==same)same.value=a.maxSameTask??'';
+  const ta=document.getElementById('auto-task');
+  if(ta&&document.activeElement!==ta&&!_autoTaskDirty)ta.value=a.task||'';
+  const fl=document.getElementById('auto-task-file');
+  if(fl)fl.textContent=_autoSlot==='main'?'auto-task.txt':`auto-task.${_autoSlot}.txt`;
+  const flag=document.getElementById('auto-task-flag');
+  if(flag){
+    const t=(a.task||'').trim();
+    flag.textContent=!t?' · 为空，该炉位自动派单不会启动':(t.toUpperCase()==='STOP'?' · 已写 STOP，自动派单会停止':' · 有待执行任务');
+  }
+}
+function switchAutoSlot(slot){
+  if(_autoTaskDirty&&!confirm('当前炉位的任务还没保存，切换会丢失，确定？'))return;
+  _autoTaskDirty=false;_autoSlot=slot;updateAuto(_burnerState);
+}
+async function loadQueue(){
+  try{
+    const s=await api('GET','/burner/state');
+    const poller=s.poller||{};
+    const lt=poller.lastTick||{};
+    const pl=document.getElementById('poller-line');
+    if(pl)pl.textContent=`轮询：${poller.running?'运行中':'停止'}`
+      +(lt.action?` · ${TICK_ACT[lt.action]||lt.action}${lt.reason?'（'+lt.reason+'）':''}`
+        +(lt.action==='multi'&&lt.n?` ×${lt.n}`:''):' · 尚未巡检');
+    updateAuto(s);
+    // 炉位忙闲变化（唤醒/收工）不经过会话库签名，需在这里触发会话列表重绘，
+    // 否则「运行中」转圈徽标会一直停留在上一次状态
+    const busy=[..._busySessions()].sort().join(',');
+    if(busy!==_busySig){ _busySig=busy; renderSessions(); }
+    const qw=document.getElementById('queue-warn');
+    const qt=document.getElementById('queue-warn-text');
+    if(qw&&qt){
+      let msg='';
+      if(!(supState.sessions||[]).length){
+        msg='当前没有绑定任何监听会话：新工单不会派单，已在途的指令也没人消费，队列会卡在「执行中」。先到上方「会话监控」给会话选炉位并保存。';
+      }else if(s.promptPending&&!s.dispatchedId){
+        msg='main 炉位有一条没有工单归属的待发指令（可能是手动下发的），它会阻塞该炉位派单；不需要就到左侧点「清空待发」。';
+      }
+      qw.style.display=msg?'flex':'none';
+      if(msg)qt.textContent=msg;
+    }
+    const q=s.queue||[],st=s.stats||{};
+    const box=document.getElementById('queue-body');
+    if(!box)return;
+    box.innerHTML=!q.length
+      ?'<div class="empty">队列空 — 新建一个工单，它会在 Stop 钩子的下一次触发时派出。</div>'
+      :`<div class="hint" style="margin-top:12px">排队 ${st.queued} · 执行中 ${st.dispatched} · 完成 ${st.done} · 失败 ${st.failed} · 取消 ${st.cancelled}${s.promptPending?' · <b style="color:var(--amber)">main 待发指令在途</b>':''}</div>
+        <table class="sup-table"><thead><tr><th>工单</th><th>炉位</th><th>状态</th><th>备注</th><th>时间</th><th></th></tr></thead><tbody>
+        ${q.map(o=>{const t=(o.dispatchedAt||o.at||0)*1000;const slot=o.slot||'main';return `<tr>
+          <td><span style="font-family:var(--mono);font-size:11.5px">${esc(o.id)}</span><br><span class="hint">${esc(o.title)}</span></td>
+          <td><span class="slot-chip">${esc(slot)}${o.auto?' · 自动':''}</span></td>
+          <td><span class="sup-st ${esc(o.status)}">${ST[o.status]||esc(o.status)}</span><br><span class="hint">${o.tries}/${o.retries}</span></td>
+          <td class="sup-note" title="${esc(o.note)}">${esc(o.note)||'—'}</td>
+          <td class="hint">${t?fmtTime(t):''}</td>
+          <td>${(o.status==='done'||o.status==='failed'||o.status==='cancelled')
+            ?`<button class="btn btn-ghost btn-sm" onclick="retryOrder('${esc(o.id)}')">重试</button>`
+            :`<button class="btn btn-ghost btn-sm" onclick="cancelOrder('${esc(o.id)}')">取消</button>`}</td>
+        </tr>`}).join('')}</tbody></table>`;
+  }catch(e){
+    const box=document.getElementById('queue-body');
+    if(box)box.innerHTML=`<div class="empty">队列加载失败：${esc(e.message)}</div>`;
+  }
+}
+async function _autoPost(path,body){
+  const r=await api('POST',path,body);
+  await loadQueue();
+  return r;
+}
+async function autoToggle(){
+  try{
+    const want=!(_burnerState.enabled);
+    await _autoPost('/burner/auto',{enabled:want});
+    showToast(want?'额度自动派单已开启（全部炉位）':'额度自动派单已关闭','success');
+  }catch(e){showToast('操作失败: '+e.message,'error');}
+}
+async function saveAutoCfg(){
+  const pick=id=>parseInt((document.getElementById(id)||{}).value||'0',10)||0;
+  try{
+    await _autoPost('/burner/auto',{
+      minRemaining:pick('auto-min'),maxRounds:Math.max(1,pick('auto-rounds')),
+      maxSameTask:Math.max(1,pick('auto-same'))});
+    showToast('自动派单参数已保存（全部炉位共用）','success');
+  }catch(e){showToast('保存失败: '+e.message,'error');}
+}
+async function saveAutoTask(){
+  const v=(document.getElementById('auto-task')||{}).value||'';
+  try{
+    const r=await _autoPost('/burner/auto/task',{text:v.trim(),slot:_autoSlot});
+    _autoTaskDirty=false;
+    showToast(v.trim()?`[${_autoSlot}] 下一项任务已保存`:`[${_autoSlot}] 任务已清空（自动派单会停）`,'success');
+  }catch(e){showToast('保存失败: '+e.message,'error');}
+}
+async function reviverToggle(){
+  const cur=((_burnerState.reviver||{}).enabled)!==false;
+  try{
+    await api('POST','/burner/revive',{enabled:!cur});
+    showToast(!cur?'会话唤醒器已开启':'会话唤醒器已关闭','success');
+    await loadQueue();
+  }catch(e){showToast('操作失败: '+e.message,'error');}
+}
+async function reviverTick(){
+  try{
+    const r=await api('POST','/burner/revive/tick',{});
+    const n=r.n||0;
+    showToast(n?`已唤醒 ${n} 个会话`:(r.reason||'巡检完成：无需唤醒'),'success');
+    await loadQueue();
+  }catch(e){showToast('巡检失败: '+e.message,'error');}
+}
+
+async function guardUnblock(){
+  if(!confirm('确认 magpie 的「当前模型」已切到 zcode2api/GLM-5.3-Flash？\n解除后炉位会恢复监听；如果通道仍然不对，硬闸会再次停机。'))return;
+  try{
+    await api('POST','/burner/revive/unblock',{});
+    showToast('通道封锁已解除，监听已恢复','success');
+    loadAll(true);
+  }catch(e){showToast('解除失败: '+e.message,'error');}
+}
+
+async function resetAuto(){
+  try{
+    await _autoPost('/burner/auto/reset',{slot:_autoSlot});
+    showToast(`[${_autoSlot}] 轮数/暂停已复位`,'success');
+  }catch(e){showToast('复位失败: '+e.message,'error');}
+}
+
+async function enqueue(){
+  const title=(document.getElementById('wo-title').value||'').trim();
+  const prompt=(document.getElementById('wo-prompt').value||'').trim();
+  if(!title||!prompt){showToast('标题和指令都要填','error');return;}
+  try{
+    await api('POST','/burner/enqueue',{title,prompt,
+      slot:(document.getElementById('wo-slot')||{}).value||'main',
+      watch:(document.getElementById('wo-watch').value||'').split(',').map(s=>s.trim()).filter(Boolean),
+      verify_cmd:(document.getElementById('wo-verify').value||'').trim(),
+      cwd:(document.getElementById('wo-cwd').value||'').trim(),
+      retries:parseInt(document.getElementById('wo-retries').value||'0',10)||0});
+    showToast('已入队','success');
+    document.getElementById('wo-title').value='';document.getElementById('wo-prompt').value='';
+    await loadQueue();
+  }catch(e){showToast('入队失败: '+e.message,'error');}
+}
+async function cancelOrder(id){if(!confirm('取消 '+id+'？'))return;try{await api('POST','/burner/order/'+encodeURIComponent(id)+'/cancel',{});showToast('已取消','success');await loadQueue();}catch(e){showToast('失败: '+e.message,'error');}}
+async function retryOrder(id){try{await api('POST','/burner/order/'+encodeURIComponent(id)+'/retry',{});showToast('已重置排队','success');await loadQueue();}catch(e){showToast('失败: '+e.message,'error');}}
+async function dispatchNow(){try{const r=await api('POST','/burner/dispatch-now',{});showToast(r.action==='dispatched'?'已派单: '+r.title:'未派单: '+(r.reason||r.action),r.action==='dispatched'?'success':'info');await loadQueue();}catch(e){showToast('失败: '+e.message,'error');}}
+async function clearDone(){try{const r=await api('POST','/burner/clear-done',{});showToast('清理 '+r.removed+' 条','success');await loadQueue();}catch(e){showToast('失败: '+e.message,'error');}}
+
+/* ── 钩子日志（展开时加载，不打扰默认视图）────────────────────────────── */
+const _hookCard=document.getElementById('hooklog-card');
+if(_hookCard){
+  _hookCard.addEventListener('toggle',()=>{if(_hookCard.open)loadHookLog(true);});
+}
+async function loadHookLog(force){
+  const card=document.getElementById('hooklog-card');
+  if(!force && !(card&&card.open))return;
+  try{
+    const r=await api('GET','/supervisor/hooklog?lines=80');
+    document.getElementById('hooklog-meta').textContent=(r.lines&&r.lines.length)
+      ?`· ${fmtTime((r.mtime||0)*1000)}`:'· 暂无记录';
+    const box=document.getElementById('hooklog-body');
+    box.textContent=(r.lines||[]).length?r.lines.join('\n'):'（钩子还没被触发过：检查插件是否启用 / ZCode 是否重启）';
+    box.scrollTop=box.scrollHeight;
+  }catch(e){
+    document.getElementById('hooklog-body').textContent='日志加载失败：'+e.message;
+  }
+}
+</script>
+</body>
+</html>

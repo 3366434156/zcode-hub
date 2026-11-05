@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from app import constants, settings, version_sync
 
 REAL_MANIFEST = """version: 3.17.1
@@ -22,6 +24,12 @@ releaseNotes: |-
     ## 新功能
     - 新增 ZCode Sites 官方插件
 """
+
+
+@pytest.fixture(autouse=True)
+def _isolate_billing_version(monkeypatch):
+    """版本巡检测试不得真的改全局 billing 版本（只验证调用）。"""
+    monkeypatch.setattr(constants, "set_billing_version", lambda v: None)
 
 
 def test_parse_manifest_version():
@@ -180,3 +188,19 @@ async def test_stop_cancels_loop(monkeypatch):
     await asyncio.sleep(0)
     await sync.stop()
     assert sync._task is None
+
+
+async def test_tick_updates_billing_version_without_follow(monkeypatch, tmp_path):
+    """billing 版本始终跟官方清单；messages 是否跟进由 APP_VERSION_FOLLOW 决定。"""
+    monkeypatch.setattr(settings, "DATA_DIR", tmp_path)
+    calls: list[str] = []
+    monkeypatch.setattr(constants, "set_billing_version", calls.append)
+    sync = version_sync.VersionSync()
+    sync.latest = "3.16.3"
+
+    async def fake_fetch():
+        return "3.17.2"
+
+    monkeypatch.setattr(version_sync, "fetch_latest_version", fake_fetch)
+    await sync._tick()
+    assert calls == ["3.17.2"]

@@ -115,7 +115,18 @@ def _bonus_active(plan: dict, now: float) -> bool:
     """plan 是否带有已生效的一次性赠送授权（balance 不含这类额度）。
 
     用于额度耗尽判定：日窗口用完但赠送池有效时，账号仍有真实可用额度。
+    plan 本身失效（status 非 active / 套餐窗口已结束）时授权一律不算——
+    否则 balance/current 残留的旧套餐会靠一条没有 ends_at 的 entitlement
+    把账号永久撑成 active。
     """
+    if not isinstance(plan, dict):
+        return False
+    status = str(plan.get("status") or "").strip().lower()
+    if status and status != "active":
+        return False
+    plan_end = _expires_ts(plan.get("ends_at") or plan.get("expires_at"))
+    if plan_end and now > plan_end:
+        return False
     for e in (plan or {}).get("entitlements") or []:
         if e.get("period") != "one_time":
             continue
@@ -124,6 +135,37 @@ def _bonus_active(plan: dict, now: float) -> bool:
         if eff and eff <= now and (not ends or now <= ends):
             return True
     return False
+
+
+def _plan_key(plan: dict) -> str:
+    """套餐去重键：user_plan_id / plan_id 二选一（两通道字段名不同）。"""
+    return str(plan.get("plan_id") or plan.get("planId")
+               or plan.get("user_plan_id") or "").strip()
+
+
+def _merge_user_plans(current: list | None, balance: list | None) -> list[dict]:
+    """合并 billing/current 与 billing/balance 的 user plans（按套餐键去重）。
+
+    2026-11-02 实证：活动套餐领取成功后 `billing/current` 返回 `{"code":0}`
+    （连 data 都没有），而 `billing/balance` 的 `data.plans[]` 才带着
+    status/starts_at/ends_at/entitlements（含 effective_at 在未来的待生效赠送）。
+    只读 current 会让「已领取、23:00 才生效」在后台上显示成「无套餐数据」，
+    耗尽判定也看不到赠送池——账号明明有额度却一直停在 exhausted。
+
+    balance 同名字段更权威（字段更全），current 独有字段（show_name 等）保留。
+    """
+    merged: dict[str, dict] = {}
+    for plan in current or []:
+        if not isinstance(plan, dict):
+            continue
+        key = _plan_key(plan) or f"current-{len(merged)}"
+        merged[key] = dict(plan)
+    for plan in balance or []:
+        if not isinstance(plan, dict):
+            continue
+        key = _plan_key(plan) or f"balance-{len(merged)}"
+        merged[key] = {**(merged.get(key) or {}), **plan}
+    return list(merged.values())
 
 
 async def fetch_quota(account: Account) -> dict:
@@ -183,18 +225,17 @@ async def fetch_quota(account: Account) -> dict:
             store.update_account(account)
             return {"error": account.last_error}
 
+    current_plans: list | None = None
     if billing_res is not None and billing_res.status_code == 200:
         try:
             data = billing_res.json()
             result["billing"] = data
-            plans = (data.get("data") or {}).get("plans") or []
-            # 全量保留（多套餐时 entitlements 不丢）；plan 兼容保留首个
-            account.plans = plans
-            account.plan = plans[0] if plans else {}
+            current_plans = (data.get("data") or {}).get("plans") or []
         except (ValueError, KeyError):
             pass
 
     quota_map: dict = {}
+    balance_plans: list | None = None
     balance_ok = False
     expired_windows = 0
     if balance_res is not None and balance_res.status_code == 200:
@@ -202,6 +243,10 @@ async def fetch_quota(account: Account) -> dict:
             data = balance_res.json()
             result["balance"] = data
             balance_ok = True
+            # balance 的 data.plans[] = 账号当前 user plans（含 entitlements
+            # 的 effective_at）：领取成功后 current 为空时，这是一份唯一的
+            # 「已领取、待生效」证据，不能丢（见 _merge_user_plans）
+            balance_plans = (data.get("data") or {}).get("plans") or []
             for bal in (data.get("data") or {}).get("balances") or []:
                 name = bal.get("show_name") or bal.get("model") or "model"
                 window = {
@@ -228,6 +273,13 @@ async def fetch_quota(account: Account) -> dict:
                 result["expired_windows"] = expired_windows
         except (ValueError, KeyError):
             balance_ok = False
+
+    # 任一通道拿到 plans 就以合并结果落库：current 与 balance 谁有数据用谁，
+    # 两边都没有（都失败）才保留上一轮快照
+    if current_plans is not None or balance_plans is not None:
+        plans = _merge_user_plans(current_plans, balance_plans)
+        account.plans = plans
+        account.plan = plans[0] if plans else {}
 
     if usage_res is not None and usage_res.status_code == 200:
         try:

@@ -54,6 +54,12 @@ async def admin_logs_page():
     return _html("logs.html")
 
 
+@router.get("/admin/supervisor", include_in_schema=False)
+async def admin_supervisor():
+    """续派监督 + 任务工单（zburn 合并页）。"""
+    return _html("supervisor.html")
+
+
 @router.get("/admin/settings", include_in_schema=False)
 async def admin_settings():
     return _html("settings.html")

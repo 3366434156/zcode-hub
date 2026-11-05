@@ -41,7 +41,8 @@ def test_client_version_single_source():
 
 def test_set_client_version_keeps_single_source():
     """运行期跟进（version_sync）也必须保持「改一处、全出口一致」。"""
-    original = constants.CLIENT_APP_VERSION
+    original_client = constants.CLIENT_APP_VERSION
+    original_billing = constants.BILLING_APP_VERSION
     try:
         constants.set_client_version("9.9.9")
         assert constants.CLIENT_APP_VERSION == "9.9.9"
@@ -52,16 +53,34 @@ def test_set_client_version_keeps_single_source():
         constants.set_client_version("")   # 空值不改写
         assert constants.CLIENT_APP_VERSION == "9.9.9"
     finally:
-        constants.set_client_version(original)
+        constants.CLIENT_APP_VERSION = original_client
+        constants.BILLING_APP_VERSION = original_billing
+        constants.USER_AGENT = f"ZCode/{original_client}"
+        constants.X_ZCODE_APP_VERSION = original_client
+
+
+def test_set_billing_version_only_moves_billing():
+    """billing 版本独立：只升不降，不碰 messages 钉版。"""
+    original_client = constants.CLIENT_APP_VERSION
+    original_billing = constants.BILLING_APP_VERSION
+    try:
+        constants.set_billing_version("9.9.9")
+        assert constants.BILLING_APP_VERSION == "9.9.9"
+        assert constants.CLIENT_APP_VERSION == original_client
+        assert constants.X_ZCODE_APP_VERSION == original_client
+        constants.set_billing_version("3.16.3")  # 低版本不回退
+        assert constants.BILLING_APP_VERSION == "9.9.9"
+    finally:
+        constants.BILLING_APP_VERSION = original_billing
 
 
 def test_billing_version_and_activation():
-    # billing 族与 messages 指纹版本同源：都是「官方客户端版本」，分开维护会漂移。
-    # 2026-10-26 实证：billing 钉 3.14.4 时 billing/preview 恒空（code:0/plans:[]），
-    # 同账号同刻换 3.16.3 立刻返回 zcode-v3-start-plan-nt-1026 —— 上游按客户端版本
-    # 门槛投放活动套餐，故两者必须相等，且等于官方现行版
-    assert constants.BILLING_APP_VERSION == constants.CLIENT_APP_VERSION
-    assert constants.BILLING_APP_VERSION == "3.16.3"
+    # billing 族必须跟官方桌面现行版（活动套餐按客户端版本门槛投放）；messages
+    # 仍钉 3.16.3（3.17.x messages 形状实测 3012）。2026-11-03 实证：同账号同设备
+    # 3.16.3 → preview 空 / claim 1004；3.17.1/3.17.2 → 出现 zcode-v3-start-plan-1103。
+    assert constants.BILLING_APP_VERSION != constants.CLIENT_APP_VERSION
+    assert constants.BILLING_APP_VERSION == "3.17.2"
+    assert constants.CLIENT_APP_VERSION == "3.16.3"
     assert constants.BILLING_TITLE == "Z Code@electron"
     assert constants.BILLING_RELEASE_CHANNEL == "stable"
     assert constants.EVENT_REPORT_URL == "https://zcode.z.ai/api/v1/event/report"
